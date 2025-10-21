@@ -168,7 +168,7 @@ export class DataGenerator {
         headers['x-arc-database'] = database;
       }
 
-      const response = await fetch(`${arcEndpoint}/write/v1/msgpack`, {
+      const response = await fetch(`${arcEndpoint}/api/v1/write/msgpack`, {
         method: 'POST',
         headers,
         body: encoded

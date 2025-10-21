@@ -2,6 +2,55 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [0.1.9] - 2024-10-21
+
+### ⚠️ BREAKING CHANGES
+- **API Endpoint Standardization**: All Arc API endpoints migrated to `/api/v1/...` pattern
+- **Requires Arc v1.0.0+**: This version requires Arc Core v1.0.0 or later
+- **Backwards Incompatible**: Will not work with pre-v1.0 Arc servers
+
+### Changed
+- Updated all API client calls to standardized `/api/v1/...` endpoints
+- Query endpoints: `/query` → `/api/v1/query`
+- Write endpoints: `/write/v1/msgpack` → `/api/v1/write/msgpack`
+- Auth endpoints: `/auth/*` → `/api/v1/auth/*`
+- Measurements: `/measurements` → `/api/v1/measurements`
+- Metrics: `/metrics` → `/api/v1/metrics`
+- Updated CSV import to use `/api/v1/write/msgpack`
+- Updated data generator to use `/api/v1/write/msgpack`
+
+### Migration
+If upgrading from pre-v1.0 Arc server:
+1. Upgrade Arc Core to v1.0.0 or later
+2. Update extension to v0.1.9
+3. Reconnect to Arc server
+4. Existing saved connections and queries work automatically
+
+## [0.1.8] - 2024-10-21
+
+### Fixed
+- Commands not registered - runtime dependencies now included in VSIX
+- Extension activation with `onStartupFinished` event
+- Activity bar icon format (PNG)
+
+## [0.1.7] - 2024-10-21
+
+### Fixed
+- Data provider registration error
+- Activity bar icon display
+
+## [0.1.6] - 2024-10-21
+
+### Improved
+- Connection error handling with detailed messages
+- Extension icon sizing (128x128)
+- Logging for debugging
+
+## [0.1.5] - 2024-10-21
+
+### Improved
+- Error handling infrastructure
+
 ## [0.1.4] - 2024-10-21
 
 ### Added

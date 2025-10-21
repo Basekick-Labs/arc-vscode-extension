@@ -2,7 +2,7 @@
 
 > Complete development toolkit for [Arc Database](https://github.com/basekick-labs/arc) - the high-performance time-series data warehouse.
 
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://marketplace.visualstudio.com/items?itemName=basekick-labs.arc-db-manager)
+[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](https://marketplace.visualstudio.com/items?itemName=basekick-labs.arc-db-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## Features
@@ -275,7 +275,43 @@ LIMIT 100;
 
 ## Release Notes
 
-### 0.1.8 - Latest
+### 0.1.9 - Latest
+
+**⚠️ BREAKING CHANGES:**
+- **API Endpoints Updated**: All Arc API endpoints migrated to `/api/v1/...` pattern
+  - Query: `/query` → `/api/v1/query`
+  - Write: `/write/v1/msgpack` → `/api/v1/write/msgpack`
+  - Auth: `/auth/*` → `/api/v1/auth/*`
+  - Measurements: `/measurements` → `/api/v1/measurements`
+  - Metrics: `/metrics` → `/api/v1/metrics`
+- **Requires Arc v1.0.0+**: This version requires Arc Core v1.0.0 or later
+- **Backwards Incompatible**: Will not work with pre-v1.0 Arc servers
+
+**What's Changed:**
+- ✨ Updated all API client calls to use standardized `/api/v1/...` endpoints
+- ✨ Improved MessagePack write endpoint to `/api/v1/write/msgpack`
+- ✨ Updated query endpoints to `/api/v1/query` and `/api/v1/query/arrow`
+- ✨ Modernized authentication endpoints to `/api/v1/auth/*`
+- ✨ Updated CSV import and data generator to use new endpoints
+
+**Migration Guide:**
+If you're upgrading from a pre-v1.0 Arc server:
+1. Upgrade Arc Core to v1.0.0 or later
+2. Update this extension to v0.1.9
+3. Reconnect to your Arc server
+4. All existing saved connections and queries will work automatically
+
+**Previous Features (still included):**
+- ✅ Extension fully working - all commands registered and functional
+- ✅ Runtime dependencies properly bundled in VSIX package
+- ✅ Connection to Arc servers working correctly
+- ✅ Activity bar icon displaying properly
+- 🎨 Arc logo icon in activity bar and extensions list
+- 🔧 Activation event set to `onStartupFinished`
+- 📦 Runtime dependencies (axios, @msgpack/msgpack) included in package
+- 🛡️ Comprehensive error handling for better debugging
+
+### 0.1.8
 
 **Critical Fix:**
 - 🐛 **FIXED: Commands not registered** - Removed `node_modules/**` from `.vscodeignore` so runtime dependencies (axios, @msgpack/msgpack) are included in VSIX package

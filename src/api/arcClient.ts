@@ -81,7 +81,7 @@ export class ArcClient {
    */
   async getMetrics(): Promise<ArcMetrics> {
     try {
-      const response = await this.client.get('/metrics');
+      const response = await this.client.get('/api/v1/metrics');
       return response.data;
     } catch (error) {
       throw this.handleError(error);
@@ -93,7 +93,7 @@ export class ArcClient {
    */
   async createToken(request?: TokenCreateRequest): Promise<TokenCreateResponse> {
     try {
-      const response = await this.client.post('/auth/tokens', request || {});
+      const response = await this.client.post('/api/v1/auth/tokens', request || {});
       return response.data;
     } catch (error) {
       throw this.handleError(error);
@@ -105,7 +105,7 @@ export class ArcClient {
    */
   async verifyToken(): Promise<TokenVerifyResponse> {
     try {
-      const response = await this.client.get('/auth/verify');
+      const response = await this.client.get('/api/v1/auth/verify');
       return { valid: true, message: response.data.message };
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 401) {
@@ -120,7 +120,7 @@ export class ArcClient {
    */
   async listTokens(): Promise<any[]> {
     try {
-      const response = await this.client.get('/auth/tokens');
+      const response = await this.client.get('/api/v1/auth/tokens');
       const data = response.data;
       return data.tokens || [];
     } catch (error) {
@@ -133,7 +133,7 @@ export class ArcClient {
    */
   async deleteServerToken(tokenId: number): Promise<void> {
     try {
-      await this.client.delete(`/auth/tokens/${tokenId}`);
+      await this.client.delete(`/api/v1/auth/tokens/${tokenId}`);
     } catch (error) {
       throw this.handleError(error);
     }
@@ -144,7 +144,7 @@ export class ArcClient {
    */
   async rotateServerToken(tokenId: number): Promise<any> {
     try {
-      const response = await this.client.post(`/auth/tokens/${tokenId}/rotate`);
+      const response = await this.client.post(`/api/v1/auth/tokens/${tokenId}/rotate`);
       return response.data;
     } catch (error) {
       throw this.handleError(error);
@@ -156,7 +156,7 @@ export class ArcClient {
    */
   async executeQuery(request: QueryRequest): Promise<ArcQueryResult> {
     try {
-      const endpoint = request.format === 'arrow' ? '/query/arrow' : '/query';
+      const endpoint = request.format === 'arrow' ? '/api/v1/query/arrow' : '/api/v1/query';
       const payload: any = {
         sql: request.query  // Arc API expects 'sql' not 'query'
       };
@@ -199,7 +199,7 @@ export class ArcClient {
     try {
       // Use SHOW TABLES query - more reliable than /measurements endpoint
       const query = database ? `SHOW TABLES FROM ${database};` : 'SHOW TABLES;';
-      const response = await this.client.post('/query', { sql: query });
+      const response = await this.client.post('/api/v1/query', { sql: query });
       const responseData = response.data;
 
       // Response format: { data: [[db, table_name, path, ...], ...] }
@@ -214,7 +214,7 @@ export class ArcClient {
       // Fallback to /measurements endpoint if query fails
       try {
         const params = database ? { database } : {};
-        const response = await this.client.get('/measurements', { params });
+        const response = await this.client.get('/api/v1/measurements', { params });
         const data = response.data;
 
         if (Array.isArray(data)) {
@@ -236,7 +236,7 @@ export class ArcClient {
   async getDatabases(): Promise<string[]> {
     try {
       // Arc supports SHOW DATABASES SQL query
-      const response = await this.client.post('/query', {
+      const response = await this.client.post('/api/v1/query', {
         sql: 'SHOW DATABASES;'  // Arc API expects 'sql' not 'query'
       });
 
@@ -281,7 +281,7 @@ export class ArcClient {
         return `${measurement}${tags ? ',' + tags : ''} ${fields} ${timestamp}`;
       }).join('\n');
 
-      await this.client.post('/write', lines, {
+      await this.client.post('/api/v1/write/line-protocol', lines, {
         headers: { 'Content-Type': 'text/plain' },
         params: database ? { db: database } : {}
       });
