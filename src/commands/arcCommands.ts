@@ -130,7 +130,20 @@ export class ArcCommands {
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Connection error details:', error);
       vscode.window.showErrorMessage(`Failed to connect: ${message}`);
+
+      // Show additional details if available
+      if (error && typeof error === 'object') {
+        const errorObj = error as any;
+        if (errorObj.code === 'ECONNREFUSED') {
+          vscode.window.showErrorMessage('Cannot reach the server. Please check the host and port.');
+        } else if (errorObj.statusCode === 401) {
+          vscode.window.showErrorMessage('Authentication failed. Please check your token.');
+        } else if (errorObj.code === 'ENOTFOUND') {
+          vscode.window.showErrorMessage('Server hostname not found. Please check the host address.');
+        }
+      }
     }
   }
 
@@ -169,7 +182,20 @@ export class ArcCommands {
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Connection activation error details:', error);
       vscode.window.showErrorMessage(`Failed to connect to ${connection.name}: ${message}`);
+
+      // Show additional details if available
+      if (error && typeof error === 'object') {
+        const errorObj = error as any;
+        if (errorObj.code === 'ECONNREFUSED') {
+          vscode.window.showErrorMessage('Cannot reach the server. Please check the host and port.');
+        } else if (errorObj.statusCode === 401) {
+          vscode.window.showErrorMessage('Authentication failed. Please check your token.');
+        } else if (errorObj.code === 'ENOTFOUND') {
+          vscode.window.showErrorMessage('Server hostname not found. Please check the host address.');
+        }
+      }
     }
   }
 

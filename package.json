@@ -2,7 +2,7 @@
   "name": "arc-db-manager",
   "displayName": "Arc Database Manager",
   "description": "Complete development toolkit for Arc Database - SQL queries, notebooks, data ingestion, monitoring, and more",
-  "version": "0.1.4",
+  "version": "0.1.8",
   "publisher": "basekick-labs",
   "icon": "resources/icon.png",
   "repository": {
@@ -36,8 +36,7 @@
     "monitoring"
   ],
   "activationEvents": [
-    "onCommand:arc.connect",
-    "onView:arcExplorer"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -260,7 +259,7 @@
         {
           "id": "arc-explorer",
           "title": "Arc Database",
-          "icon": "resources/icons/arc-icon.svg"
+          "icon": "resources/icon.png"
         }
       ]
     },
@@ -269,7 +268,7 @@
         {
           "id": "arcExplorer",
           "name": "Databases & Tables",
-          "icon": "resources/icons/arc-icon.svg",
+          "icon": "resources/icon.png",
           "contextualTitle": "Arc Database Explorer"
         },
         {

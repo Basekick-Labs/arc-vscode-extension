@@ -8,8 +8,7 @@ import {
   TokenCreateResponse,
   TokenVerifyResponse,
   QueryRequest,
-  MeasurementInfo,
-  ArcError
+  MeasurementInfo
 } from '../types';
 
 export class ArcClient {
@@ -22,6 +21,10 @@ export class ArcClient {
     this.token = token;
 
     const baseURL = `${connection.protocol}://${connection.host}:${connection.port}`;
+    console.log(`[ArcClient] Creating client with baseURL: ${baseURL}`, {
+      hasToken: !!token,
+      tokenLength: token?.length
+    });
 
     this.client = axios.create({
       baseURL,
@@ -36,6 +39,10 @@ export class ArcClient {
       if (this.token) {
         config.headers.Authorization = `Bearer ${this.token}`;
       }
+      console.log(`[ArcClient] Request to: ${config.baseURL}${config.url}`, {
+        method: config.method,
+        hasAuth: !!config.headers.Authorization
+      });
       return config;
     });
   }
@@ -59,9 +66,12 @@ export class ArcClient {
    */
   async healthCheck(): Promise<ArcHealthStatus> {
     try {
+      console.log(`[ArcClient] Attempting health check to: ${this.client.defaults.baseURL}/health`);
       const response = await this.client.get('/health');
+      console.log('[ArcClient] Health check successful:', response.data);
       return response.data;
     } catch (error) {
+      console.error('[ArcClient] Health check failed:', error);
       throw this.handleError(error);
     }
   }
@@ -283,19 +293,49 @@ export class ArcClient {
   /**
    * Handle and normalize errors
    */
-  private handleError(error: unknown): ArcError {
+  private handleError(error: unknown): Error {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
       const responseData = axiosError.response?.data as any;
-      return {
-        message: responseData?.message || axiosError.message || 'Unknown error',
+
+      // Build detailed error message
+      let message = responseData?.message || axiosError.message || 'Unknown error';
+
+      // Add more context for common errors
+      if (axiosError.code === 'ECONNREFUSED') {
+        message = `Cannot connect to ${this.connection.protocol}://${this.connection.host}:${this.connection.port} - Connection refused`;
+      } else if (axiosError.code === 'ENOTFOUND') {
+        message = `Cannot resolve hostname: ${this.connection.host}`;
+      } else if (axiosError.code === 'ETIMEDOUT') {
+        message = `Connection timeout to ${this.connection.host}:${this.connection.port}`;
+      } else if (axiosError.response?.status === 401) {
+        message = 'Authentication failed - Invalid or missing token';
+      } else if (axiosError.response?.status === 403) {
+        message = 'Access forbidden - Check token permissions';
+      } else if (axiosError.response?.status === 404) {
+        message = 'Endpoint not found - Check server URL';
+      }
+
+      const err = new Error(message);
+      (err as any).code = axiosError.code;
+      (err as any).statusCode = axiosError.response?.status;
+      (err as any).originalError = axiosError;
+
+      console.error('[ArcClient] Error details:', {
         code: axiosError.code,
-        statusCode: axiosError.response?.status
-      };
+        status: axiosError.response?.status,
+        url: axiosError.config?.url,
+        baseURL: axiosError.config?.baseURL,
+        message
+      });
+
+      return err;
     }
 
-    return {
-      message: error instanceof Error ? error.message : 'Unknown error occurred'
-    };
+    if (error instanceof Error) {
+      return error;
+    }
+
+    return new Error('Unknown error occurred');
   }
 }

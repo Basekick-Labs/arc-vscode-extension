@@ -14,6 +14,7 @@ import { ArcCommands } from './commands/arcCommands';
 export function activate(context: vscode.ExtensionContext) {
   console.log('Arc Database Manager extension is now active');
 
+  try {
   // Initialize connection manager
   const connectionManager = ConnectionManager.initialize(context);
 
@@ -83,8 +84,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Create wrappers that update status bar
   const connectWithUpdate = async () => {
-    await commands.connect();
-    updateStatusBar();
+    try {
+      await commands.connect();
+      updateStatusBar();
+    } catch (error) {
+      console.error('Connection wrapper error:', error);
+      // Error is already shown by commands.connect(), just update status bar
+      updateStatusBar();
+    }
   };
 
   const disconnectWithUpdate = async () => {
@@ -240,6 +247,13 @@ export function activate(context: vscode.ExtensionContext) {
       }
     });
     context.globalState.update('arc.hasShownWelcome', true);
+  }
+  } catch (error) {
+    console.error('FATAL ERROR activating Arc extension:', error);
+    vscode.window.showErrorMessage(
+      `Arc Database Manager failed to activate: ${error instanceof Error ? error.message : String(error)}. Check Developer Console (Help > Toggle Developer Tools) for details.`
+    );
+    throw error; // Re-throw to ensure VS Code knows the extension failed
   }
 }
 

@@ -2,7 +2,7 @@
 
 > Complete development toolkit for [Arc Database](https://github.com/basekick-labs/arc) - the high-performance time-series data warehouse.
 
-[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://marketplace.visualstudio.com/items?itemName=basekick-labs.arc-db-manager)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://marketplace.visualstudio.com/items?itemName=basekick-labs.arc-db-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## Features
@@ -275,7 +275,50 @@ LIMIT 100;
 
 ## Release Notes
 
-### 0.1.4 - Latest
+### 0.1.8 - Latest
+
+**Critical Fix:**
+- 🐛 **FIXED: Commands not registered** - Removed `node_modules/**` from `.vscodeignore` so runtime dependencies (axios, @msgpack/msgpack) are included in VSIX package
+- 🐛 Extension now properly activates and all commands work correctly
+
+**Bug Fixes:**
+- 🐛 Changed activation event to `onStartupFinished` for reliable loading
+- 🐛 Added comprehensive error handling to catch activation failures
+- 🐛 Fixed activity bar icon to use PNG format
+
+**Improvements:**
+- 🎨 Better activation event handling
+- 📊 Detailed error messages in Developer Console for debugging
+
+### 0.1.7
+
+**Bug Fixes:**
+- 🐛 Fixed "no data provider registered" error that prevented extension from activating
+- 🐛 Fixed activity bar icon - now shows correct Arc logo (PNG) instead of cylinder
+- 🐛 Removed overly broad try-catch that was breaking provider registration
+
+**Improvements:**
+- 🎨 Updated activity bar icon to use PNG format with Arc logo
+- 🎨 Icon now properly displays in VS Code activity bar and extensions list
+
+### 0.1.6
+
+**Bug Fixes:**
+- 🐛 Fixed connection error handling with detailed error messages
+- 🐛 Updated extension icon to proper 128x128 size
+- 🐛 Added extensive logging for debugging connection issues
+- 🐛 Improved error messages for common connection failures (ECONNREFUSED, ENOTFOUND, timeouts)
+
+**Improvements:**
+- 📊 Better error reporting in Developer Console
+- 🔍 Enhanced debugging with [ArcClient] prefixed logs
+
+### 0.1.5
+
+**Improvements:**
+- 🔧 Improved error handling infrastructure
+
+### 0.1.4
 
 **New Features:**
 - ✨ Parameterized queries with variables in notebooks
