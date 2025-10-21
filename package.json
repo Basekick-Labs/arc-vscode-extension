@@ -1,0 +1,530 @@
+{
+  "name": "arc-db-manager",
+  "displayName": "Arc Database Manager",
+  "description": "Complete development toolkit for Arc Database - SQL queries, notebooks, data ingestion, monitoring, and more",
+  "version": "0.1.4",
+  "publisher": "basekick-labs",
+  "icon": "resources/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/basekick-labs/arc-vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/basekick-labs/arc-vscode-extension/issues"
+  },
+  "homepage": "https://github.com/basekick-labs/arc",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Data Science",
+    "Programming Languages",
+    "Notebooks",
+    "Visualization"
+  ],
+  "keywords": [
+    "arc",
+    "database",
+    "time-series",
+    "duckdb",
+    "analytics",
+    "sql",
+    "data",
+    "notebook",
+    "visualization",
+    "monitoring"
+  ],
+  "activationEvents": [
+    "onCommand:arc.connect",
+    "onView:arcExplorer"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "arc.connect",
+        "title": "Arc: Connect to Server",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "arc.disconnect",
+        "title": "Arc: Disconnect",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "arc.createToken",
+        "title": "Arc: Create Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "arc.verifyToken",
+        "title": "Arc: Verify Token",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "arc.newQuery",
+        "title": "Arc: New Query",
+        "icon": "$(search)"
+      },
+      {
+        "command": "arc.executeQuery",
+        "title": "Arc: Execute Query",
+        "icon": "$(run)"
+      },
+      {
+        "command": "arc.refreshExplorer",
+        "title": "Arc: Refresh Explorer",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "arc.showMeasurements",
+        "title": "Arc: Show Measurements",
+        "icon": "$(database)"
+      },
+      {
+        "command": "arc.insertTestData",
+        "title": "Arc: Insert Test Data",
+        "icon": "$(debug-console)"
+      },
+      {
+        "command": "arc.showHealth",
+        "title": "Arc: Show Health Status",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "arc.showMetrics",
+        "title": "Arc: Show Metrics",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "arc.editConnection",
+        "title": "Arc: Edit Connection",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "arc.deleteConnection",
+        "title": "Arc: Delete Connection",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "arc.updateToken",
+        "title": "Arc: Update Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "arc.deleteToken",
+        "title": "Arc: Delete Token",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "arc.createServerToken",
+        "title": "Arc: Create Server Token",
+        "icon": "$(add)"
+      },
+      {
+        "command": "arc.deleteServerToken",
+        "title": "Arc: Delete Server Token",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "arc.rotateServerToken",
+        "title": "Arc: Rotate Server Token",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "arc.refreshTokens",
+        "title": "Arc: Refresh Tokens",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "arc.saveCurrentQuery",
+        "title": "Arc: Save Current Query",
+        "icon": "$(save)"
+      },
+      {
+        "command": "arc.deleteSavedQuery",
+        "title": "Arc: Delete Saved Query",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "arc.renameSavedQuery",
+        "title": "Arc: Rename Saved Query",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "arc.deleteHistoryItem",
+        "title": "Arc: Delete from History",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "arc.clearQueryHistory",
+        "title": "Arc: Clear Query History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "arc.refreshQueries",
+        "title": "Arc: Refresh Queries",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "arc.showTableSchema",
+        "title": "Arc: Show Table Schema",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "arc.previewTableData",
+        "title": "Arc: Preview Table Data",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "arc.showTableStats",
+        "title": "Arc: Show Table Statistics",
+        "icon": "$(info)"
+      },
+      {
+        "command": "arc.generateSelectQuery",
+        "title": "Arc: Generate SELECT Query",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "arc.queryLastHour",
+        "title": "Arc: Query Last Hour",
+        "icon": "$(clock)"
+      },
+      {
+        "command": "arc.queryToday",
+        "title": "Arc: Query Today",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "arc.newNotebook",
+        "title": "Arc: New Notebook",
+        "icon": "$(notebook)"
+      },
+      {
+        "command": "arc.importCSV",
+        "title": "Arc: Import CSV",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "arc.generateTestData",
+        "title": "Arc: Generate Test Data",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "arc.createAlert",
+        "title": "Arc: Create Alert",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "arc.toggleAlert",
+        "title": "Arc: Toggle Alert",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "arc.deleteAlert",
+        "title": "Arc: Delete Alert",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "arc.showAlertDetails",
+        "title": "Arc: Show Alert Details",
+        "icon": "$(info)"
+      },
+      {
+        "command": "arc.clearAlertTriggers",
+        "title": "Arc: Clear Alert Triggers",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "arc.refreshAlerts",
+        "title": "Arc: Refresh Alerts",
+        "icon": "$(refresh)"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "arc.notebook",
+        "displayName": "Arc Notebook",
+        "selector": [
+          {
+            "filenamePattern": "*.arcnb"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "arc-explorer",
+          "title": "Arc Database",
+          "icon": "resources/icons/arc-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "arc-explorer": [
+        {
+          "id": "arcExplorer",
+          "name": "Databases & Tables",
+          "icon": "resources/icons/arc-icon.svg",
+          "contextualTitle": "Arc Database Explorer"
+        },
+        {
+          "id": "arcConnections",
+          "name": "Connections",
+          "icon": "resources/icons/arc-icon.svg"
+        },
+        {
+          "id": "arcTokens",
+          "name": "Server Tokens",
+          "icon": "resources/icons/arc-icon.svg",
+          "contextualTitle": "Arc Server Tokens"
+        },
+        {
+          "id": "arcQueries",
+          "name": "Queries",
+          "icon": "resources/icons/arc-icon.svg",
+          "contextualTitle": "Arc Queries"
+        },
+        {
+          "id": "arcAlerts",
+          "name": "Alerts",
+          "icon": "resources/icons/arc-icon.svg",
+          "contextualTitle": "Arc Alerts & Monitoring"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Arc Database",
+      "properties": {
+        "arc.defaultHost": {
+          "type": "string",
+          "default": "localhost",
+          "description": "Default Arc server host"
+        },
+        "arc.defaultPort": {
+          "type": "number",
+          "default": 8000,
+          "description": "Default Arc server port"
+        },
+        "arc.defaultProtocol": {
+          "type": "string",
+          "enum": [
+            "http",
+            "https"
+          ],
+          "default": "http",
+          "description": "Default protocol for Arc server"
+        },
+        "arc.queryTimeout": {
+          "type": "number",
+          "default": 30000,
+          "description": "Query timeout in milliseconds"
+        },
+        "arc.maxResults": {
+          "type": "number",
+          "default": 1000,
+          "description": "Maximum number of results to display"
+        },
+        "arc.resultFormat": {
+          "type": "string",
+          "enum": [
+            "json",
+            "arrow"
+          ],
+          "default": "json",
+          "description": "Default result format for queries"
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "arc.connect",
+          "when": "view == arcExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "arc.refreshExplorer",
+          "when": "view == arcExplorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "arc.saveCurrentQuery",
+          "when": "view == arcQueries",
+          "group": "navigation@1"
+        },
+        {
+          "command": "arc.clearQueryHistory",
+          "when": "view == arcQueries",
+          "group": "navigation@2"
+        },
+        {
+          "command": "arc.refreshQueries",
+          "when": "view == arcQueries",
+          "group": "navigation@3"
+        },
+        {
+          "command": "arc.createServerToken",
+          "when": "view == arcTokens",
+          "group": "navigation@1"
+        },
+        {
+          "command": "arc.refreshTokens",
+          "when": "view == arcTokens",
+          "group": "navigation@2"
+        },
+        {
+          "command": "arc.createAlert",
+          "when": "view == arcAlerts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "arc.clearAlertTriggers",
+          "when": "view == arcAlerts",
+          "group": "navigation@2"
+        },
+        {
+          "command": "arc.refreshAlerts",
+          "when": "view == arcAlerts",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "arc.newQuery",
+          "when": "view == arcExplorer && viewItem == database",
+          "group": "inline"
+        },
+        {
+          "command": "arc.editConnection",
+          "when": "view == arcConnections && viewItem == connection",
+          "group": "connection@1"
+        },
+        {
+          "command": "arc.updateToken",
+          "when": "view == arcConnections && viewItem == connection",
+          "group": "connection@2"
+        },
+        {
+          "command": "arc.deleteToken",
+          "when": "view == arcConnections && viewItem == connection",
+          "group": "connection@3"
+        },
+        {
+          "command": "arc.deleteConnection",
+          "when": "view == arcConnections && viewItem == connection",
+          "group": "danger@1"
+        },
+        {
+          "command": "arc.rotateServerToken",
+          "when": "view == arcTokens && viewItem == token",
+          "group": "token@1"
+        },
+        {
+          "command": "arc.deleteServerToken",
+          "when": "view == arcTokens && viewItem == token",
+          "group": "danger@1"
+        },
+        {
+          "command": "arc.previewTableData",
+          "when": "view == arcExplorer && viewItem == measurement",
+          "group": "table@1"
+        },
+        {
+          "command": "arc.showTableSchema",
+          "when": "view == arcExplorer && viewItem == measurement",
+          "group": "table@2"
+        },
+        {
+          "command": "arc.showTableStats",
+          "when": "view == arcExplorer && viewItem == measurement",
+          "group": "table@3"
+        },
+        {
+          "command": "arc.generateSelectQuery",
+          "when": "view == arcExplorer && viewItem == measurement",
+          "group": "query@1"
+        },
+        {
+          "command": "arc.queryLastHour",
+          "when": "view == arcExplorer && viewItem == measurement",
+          "group": "query@2"
+        },
+        {
+          "command": "arc.queryToday",
+          "when": "view == arcExplorer && viewItem == measurement",
+          "group": "query@3"
+        },
+        {
+          "command": "arc.renameSavedQuery",
+          "when": "view == arcQueries && viewItem == savedQuery",
+          "group": "query@1"
+        },
+        {
+          "command": "arc.deleteSavedQuery",
+          "when": "view == arcQueries && viewItem == savedQuery",
+          "group": "danger@1"
+        },
+        {
+          "command": "arc.deleteHistoryItem",
+          "when": "view == arcQueries && viewItem == historyQuery",
+          "group": "danger@1"
+        },
+        {
+          "command": "arc.showAlertDetails",
+          "when": "view == arcAlerts && viewItem == alert",
+          "group": "alert@1"
+        },
+        {
+          "command": "arc.toggleAlert",
+          "when": "view == arcAlerts && viewItem == alert",
+          "group": "alert@2"
+        },
+        {
+          "command": "arc.deleteAlert",
+          "when": "view == arcAlerts && viewItem == alert",
+          "group": "danger@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "arc.executeQuery",
+          "when": "resourceLangId == sql || resourceExtname == .arcsql",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "arc.executeQuery",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && (resourceLangId == sql || resourceExtname == .arcsql)"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2",
+    "axios": "^1.6.5"
+  }
+}
