@@ -1093,8 +1093,8 @@ export class ArcCommands {
         return;
       }
 
-      const tableName = treeItem?.table || treeItem?.label;
-      const database = treeItem?.database;
+      const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
+      const database = treeItem?.metadata?.database || treeItem?.database;
 
       if (!tableName) {
         vscode.window.showWarningMessage('No table selected');
@@ -1146,8 +1146,8 @@ export class ArcCommands {
         return;
       }
 
-      const tableName = treeItem?.table || treeItem?.label;
-      const database = treeItem?.database;
+      const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
+      const database = treeItem?.metadata?.database || treeItem?.database;
 
       if (!tableName) {
         vscode.window.showWarningMessage('No table selected');
@@ -1191,8 +1191,8 @@ export class ArcCommands {
         return;
       }
 
-      const tableName = treeItem?.table || treeItem?.label;
-      const database = treeItem?.database;
+      const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
+      const database = treeItem?.metadata?.database || treeItem?.database;
 
       if (!tableName) {
         vscode.window.showWarningMessage('No table selected');
@@ -1243,14 +1243,16 @@ export class ArcCommands {
    * Generate SELECT query for table
    */
   async generateSelectQuery(treeItem: any): Promise<void> {
-    const tableName = treeItem?.table || treeItem?.label;
-    const database = treeItem?.database;
+    // Get measurement (table) name and database from metadata
+    const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
+    const database = treeItem?.metadata?.database || treeItem?.database;
 
     if (!tableName) {
       vscode.window.showWarningMessage('No table selected');
       return;
     }
 
+    // Always include database prefix if available
     const fullTableName = database ? `${database}.${tableName}` : tableName;
     const query = `SELECT * FROM ${fullTableName} LIMIT 100;`;
 
@@ -1261,8 +1263,8 @@ export class ArcCommands {
    * Query last hour of data
    */
   async queryLastHour(treeItem: any): Promise<void> {
-    const tableName = treeItem?.table || treeItem?.label;
-    const database = treeItem?.database;
+    const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
+    const database = treeItem?.metadata?.database || treeItem?.database;
 
     if (!tableName) {
       return;
@@ -1281,8 +1283,8 @@ LIMIT 1000;`;
    * Query today's data
    */
   async queryToday(treeItem: any): Promise<void> {
-    const tableName = treeItem?.table || treeItem?.label;
-    const database = treeItem?.database;
+    const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
+    const database = treeItem?.metadata?.database || treeItem?.database;
 
     if (!tableName) {
       return;
