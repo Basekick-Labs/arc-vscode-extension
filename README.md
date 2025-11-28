@@ -2,7 +2,7 @@
 
 > Complete development toolkit for [Arc Database](https://github.com/basekick-labs/arc) - the high-performance time-series data warehouse.
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://marketplace.visualstudio.com/items?itemName=basekick-labs.arc-db-manager)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](https://marketplace.visualstudio.com/items?itemName=basekick-labs.arc-db-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## Features
@@ -275,7 +275,12 @@ LIMIT 100;
 
 ## Release Notes
 
-### 0.2.0 - Latest
+### 0.2.1 - Latest
+
+**Bug Fixes:**
+- **Token Rotation Copy Bug**: Fixed issue where clicking "Copy Token" after rotating a token did not copy the new token to clipboard
+
+### 0.2.0
 
 **New Features:**
 - **Auto-qualified table names in queries** - Right-click queries now automatically include database prefix (e.g., `telegraf.cpu` instead of just `cpu`)
