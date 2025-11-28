@@ -2,6 +2,11 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [0.2.1] - 2025-11-28
+
+### Fixed
+- **Token Rotation Copy Bug**: Fixed issue where clicking "Copy Token" after rotating a token did not copy the new token to clipboard. The extension was looking for `response.token` but the Arc API returns the new token in `response.new_token`.
+
 ## [0.1.9] - 2024-10-21
 
 ### ⚠️ BREAKING CHANGES

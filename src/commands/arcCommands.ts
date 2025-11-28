@@ -878,8 +878,8 @@ export class ArcCommands {
         'Copy Token'
       );
 
-      if (action === 'Copy Token' && response.token) {
-        await vscode.env.clipboard.writeText(response.token);
+      if (action === 'Copy Token' && response.new_token) {
+        await vscode.env.clipboard.writeText(response.new_token);
         vscode.window.showInformationMessage('New token copied to clipboard');
       }
 
