@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../utils/connectionManager';
 import { ArcNotebook, ArcNotebookCell } from '../types/notebook';
+import { escapeHtml } from '../utils/sqlUtils';
 
 export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvider {
   public static register(context: vscode.ExtensionContext, connectionManager: ConnectionManager): vscode.Disposable {
@@ -92,7 +93,9 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     try {
       // Execute the SQL query
-      const results = await client.executeQuery({ query, format: 'json' });
+      const config = vscode.workspace.getConfiguration('arc');
+      const format = config.get<'json' | 'arrow'>('resultFormat', 'json');
+      const results = await client.executeQuery({ query, format });
 
       // Send results back to webview
       webview.postMessage({
@@ -132,6 +135,15 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     }
   }
 
+  private getNonce(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let nonce = '';
+    for (let i = 0; i < 32; i++) {
+      nonce += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return nonce;
+  }
+
   private getHtmlContent(webview: vscode.Webview, document: vscode.TextDocument): string {
     let notebook: ArcNotebook;
 
@@ -143,12 +155,14 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     }
 
     const cellsHtml = notebook.cells.map((cell, i) => this.renderCell(cell, i)).join('');
+    const nonce = this.getNonce();
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource}; img-src ${webview.cspSource} data:;">
     <title>Arc Notebook</title>
     <style>
         body {
@@ -349,7 +363,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         ${cellsHtml}
     </div>
 
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         let notebook = ${JSON.stringify(notebook)};
 
@@ -432,7 +446,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 // Match \${key} pattern
                 const pattern = new RegExp(\`\\\\\\\$\\\\{\${key}\\\\}\`, 'g');
                 // Quote string values, leave numbers as-is
-                const quotedValue = isNaN(value) ? \`'\${value}'\` : value;
+                const quotedValue = isNaN(value) ? \`'\${value.replace(/'/g, "''") }'\` : value;
                 result = result.replace(pattern, quotedValue);
             });
 
@@ -613,11 +627,11 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     let outputHtml = '';
     if (cell.output) {
       if (cell.output.error) {
-        outputHtml = `<div class="cell-output"><div class="error">${this.escapeHtml(cell.output.error)}</div></div>`;
+        outputHtml = `<div class="cell-output"><div class="error">${escapeHtml(cell.output.error)}</div></div>`;
       } else if (cell.output.rows && cell.output.columns) {
-        const headers = cell.output.columns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('');
+        const headers = cell.output.columns.map(col => `<th>${escapeHtml(col)}</th>`).join('');
         const rows = cell.output.rows.slice(0, 100).map(row =>
-          '<tr>' + row.map(cell => `<td>${this.escapeHtml(String(cell || ''))}</td>`).join('') + '</tr>'
+          '<tr>' + row.map(cell => `<td>${escapeHtml(String(cell || ''))}</td>`).join('') + '</tr>'
         ).join('');
         const stats = `<div class="stats">Rows: ${cell.output.rowCount || 0} | Execution Time: ${cell.output.executionTime?.toFixed(2) || 0}ms</div>`;
         outputHtml = `<div class="cell-output">${stats}<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -634,21 +648,11 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
           </div>
         </div>
         <div class="cell-content ${cellClass}">
-          <textarea oninput="onCellChange(${index})" rows="${Math.max(3, content.split('\n').length)}">${this.escapeHtml(content)}</textarea>
+          <textarea oninput="onCellChange(${index})" rows="${Math.max(3, content.split('\n').length)}">${escapeHtml(content)}</textarea>
         </div>
         ${outputHtml}
       </div>
     `;
   }
 
-  private escapeHtml(text: string): string {
-    const map: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, m => map[m]);
-  }
 }

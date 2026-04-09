@@ -2,6 +2,29 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [0.3.0] - 2026-04-09
+
+### Added
+- **x-arc-database Header Support**: Queries now send the database context via the `x-arc-database` HTTP header instead of embedding `database.table` in SQL, improving query performance. Both forms remain supported.
+- **Apache Arrow Query Format**: Full support for the `/api/v1/query/arrow` endpoint using the `apache-arrow` library. Configure via the `arc.resultFormat` setting (default: `json`). Arrow format is significantly faster for large result sets.
+- **Active Database in Status Bar**: The status bar now shows the active database alongside the connection name.
+
+### Fixed
+- **SQL Injection in Generated Queries**: Table and database names in generated SQL (schema, preview, stats, etc.) are now properly quoted using `quoteIdentifier()` to prevent injection via specially-crafted measurement names.
+- **Notebook Variable Injection**: Variable substitution in Arc Notebooks now escapes single quotes in string values, preventing SQL injection through notebook variables.
+- **Completion Provider Performance**: Database/table completions are now cached for 30 seconds with request deduplication, eliminating redundant network requests on every keystroke.
+- **Webview Content Security Policy**: All webviews (query results, notebooks) now include a strict CSP with nonce-based script authorization. Chart.js is bundled locally instead of loaded from a CDN, improving security and offline reliability.
+- **Query Timeout Setting**: The `arc.queryTimeout` configuration setting is now actually read and applied (was previously hardcoded to 30s).
+- **Double Health Check**: Removed duplicate `healthCheck()` call when connecting to a server.
+- **Alert Condition Equality**: Alert `equals`/`not_equals` conditions now use strict string comparison instead of loose `==` which caused false positives (e.g., `0 == ""`).
+- **Alert Timer Memory Leak**: Alert timer callbacks now self-cleanup if the alert was deleted while a check was in-flight. Minimum check interval of 10 seconds is enforced to prevent server overload.
+- **TypeScript Deprecation**: Updated `moduleResolution` from deprecated `node` to `Node16` for TypeScript 7.0 compatibility.
+
+### Changed
+- Extracted shared `escapeHtml`, `quoteIdentifier`, and `escapeSqlString` utilities to reduce code duplication.
+- Extracted `requireConnectedClient()` helper to replace ~15 duplicate connection-check patterns.
+- Removed redundant error detail blocks that duplicated messages already produced by the error handler.
+
 ## [0.2.1] - 2025-11-28
 
 ### Fixed

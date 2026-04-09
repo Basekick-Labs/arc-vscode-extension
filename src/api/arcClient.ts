@@ -16,19 +16,18 @@ export class ArcClient {
   private connection: ArcConnection;
   private token?: string;
 
-  constructor(connection: ArcConnection, token?: string) {
+  constructor(connection: ArcConnection, token?: string, timeout?: number) {
     this.connection = connection;
     this.token = token;
 
     const baseURL = `${connection.protocol}://${connection.host}:${connection.port}`;
     console.log(`[ArcClient] Creating client with baseURL: ${baseURL}`, {
-      hasToken: !!token,
-      tokenLength: token?.length
+      hasToken: !!token
     });
 
     this.client = axios.create({
       baseURL,
-      timeout: 30000,
+      timeout: timeout ?? 30000,
       headers: {
         'Content-Type': 'application/json'
       }
@@ -161,23 +160,31 @@ export class ArcClient {
         sql: request.query  // Arc API expects 'sql' not 'query'
       };
 
+      // Send database via x-arc-database header (more performant than database.table syntax)
+      const headers: Record<string, string> = {};
       if (request.database) {
-        payload.database = request.database;
+        headers['x-arc-database'] = request.database;
       }
-
-      const response = await this.client.post(endpoint, payload);
 
       // Parse response based on format
       if (request.format === 'arrow') {
-        // Arrow format returns binary data - for now return raw
-        // You'll need apache-arrow library to parse properly
+        const response = await this.client.post(endpoint, payload, {
+          headers,
+          responseType: 'arraybuffer'
+        });
+
+        // Arrow format returns binary IPC data -- parsed in arrowParser.ts
+        const { parseArrowResponse } = await import('../utils/arrowParser.js');
+        const parsed = parseArrowResponse(response.data);
         return {
-          columns: [],
-          rows: [],
-          rowCount: 0,
-          executionTime: response.data.execution_time_ms
+          columns: parsed.columns,
+          rows: parsed.rows,
+          rowCount: parsed.rowCount,
+          executionTime: undefined
         };
       } else {
+        const response = await this.client.post(endpoint, payload, { headers });
+
         // JSON format - Arc returns 'data' field with rows
         const responseData = response.data;
         return {
@@ -197,9 +204,12 @@ export class ArcClient {
    */
   async getMeasurements(database?: string): Promise<MeasurementInfo[]> {
     try {
-      // Use SHOW TABLES query - more reliable than /measurements endpoint
-      const query = database ? `SHOW TABLES FROM ${database};` : 'SHOW TABLES;';
-      const response = await this.client.post('/api/v1/query', { sql: query });
+      // Use SHOW TABLES with x-arc-database header for database context
+      const headers: Record<string, string> = {};
+      if (database) {
+        headers['x-arc-database'] = database;
+      }
+      const response = await this.client.post('/api/v1/query', { sql: 'SHOW TABLES;' }, { headers });
       const responseData = response.data;
 
       // Response format: { data: [[db, table_name, path, ...], ...] }
@@ -281,9 +291,13 @@ export class ArcClient {
         return `${measurement}${tags ? ',' + tags : ''} ${fields} ${timestamp}`;
       }).join('\n');
 
+      const writeHeaders: Record<string, string> = { 'Content-Type': 'text/plain' };
+      if (database) {
+        writeHeaders['x-arc-database'] = database;
+      }
+
       await this.client.post('/api/v1/write/line-protocol', lines, {
-        headers: { 'Content-Type': 'text/plain' },
-        params: database ? { db: database } : {}
+        headers: writeHeaders
       });
     } catch (error) {
       throw this.handleError(error);
