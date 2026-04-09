@@ -148,7 +148,8 @@ export class AlertManager {
         return;
       }
 
-      // Execute query
+      // Alert queries are user-written and may use database.table syntax,
+      // so don't send x-arc-database header (Arc rejects cross-database syntax with header)
       const result = await client.executeQuery({ query: alert.query, format: 'json' });
 
       if (!result.rows || result.rows.length === 0) {

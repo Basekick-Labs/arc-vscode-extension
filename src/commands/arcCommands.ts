@@ -12,7 +12,6 @@ import { CSVImporter } from '../utils/csvImporter';
 import { DataGenerator } from '../utils/dataGenerator';
 import { AlertManager } from '../utils/alertManager';
 import { ArcAlertsProvider } from '../providers/arcAlertsProvider';
-import { quoteIdentifier } from '../utils/sqlUtils';
 
 export class ArcCommands {
   private tokensProvider?: ArcTokensProvider;
@@ -494,10 +493,11 @@ export class ArcCommands {
             cancellable: false
           },
           async () => {
+            // User-written queries may use database.table syntax, so don't send
+            // x-arc-database header (Arc rejects cross-database syntax with header)
             const config = vscode.workspace.getConfiguration('arc');
             const format = config.get<'json' | 'arrow'>('resultFormat', 'json');
-            const database = this.connectionManager.getActiveDatabase();
-            return await client.executeQuery({ query, format, database });
+            return await client.executeQuery({ query, format });
           }
         );
 
@@ -554,7 +554,8 @@ export class ArcCommands {
       const client = this.requireConnectedClient();
       if (!client) { return; }
 
-      const measurements = await client.getMeasurements();
+      const database = this.connectionManager.getActiveDatabase();
+      const measurements = await client.getMeasurements(database);
       const names = measurements.map(m => m.name).join('\n');
 
       const doc = await vscode.workspace.openTextDocument({
@@ -1018,7 +1019,7 @@ export class ArcCommands {
       }
 
       // Use DESCRIBE SELECT to get schema (DuckDB compatible)
-      const schemaQuery = `DESCRIBE SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 1`;
+      const schemaQuery = `DESCRIBE SELECT * FROM ${tableName} LIMIT 1`;
 
       const results = await vscode.window.withProgress(
         {
@@ -1062,7 +1063,7 @@ export class ArcCommands {
         return;
       }
 
-      const query = `SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 10`;
+      const query = `SELECT * FROM ${tableName} LIMIT 10`;
 
       const results = await vscode.window.withProgress(
         {
@@ -1105,7 +1106,7 @@ export class ArcCommands {
           COUNT(*) as row_count,
           MIN(time) as earliest_timestamp,
           MAX(time) as latest_timestamp
-        FROM ${quoteIdentifier(tableName)}
+        FROM ${tableName}
       `;
 
       const results = await vscode.window.withProgress(
@@ -1146,9 +1147,7 @@ export class ArcCommands {
     }
 
     // Include database prefix with proper quoting for editor-opened queries
-    const fullTableName = database
-      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
-      : quoteIdentifier(tableName);
+    const fullTableName = database ? `${database}.${tableName}` : tableName;
     const query = `SELECT * FROM ${fullTableName} LIMIT 100;`;
 
     await this.openQuery(query);
@@ -1165,9 +1164,7 @@ export class ArcCommands {
       return;
     }
 
-    const fullTableName = database
-      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
-      : quoteIdentifier(tableName);
+    const fullTableName = database ? `${database}.${tableName}` : tableName;
     const query = `SELECT * FROM ${fullTableName}
 WHERE time > NOW() - INTERVAL '1 hour'
 ORDER BY time DESC
@@ -1187,9 +1184,7 @@ LIMIT 1000;`;
       return;
     }
 
-    const fullTableName = database
-      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
-      : quoteIdentifier(tableName);
+    const fullTableName = database ? `${database}.${tableName}` : tableName;
     const query = `SELECT * FROM ${fullTableName}
 WHERE time >= CURRENT_DATE
 ORDER BY time DESC

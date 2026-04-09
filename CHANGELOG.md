@@ -2,6 +2,15 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [0.3.6] - 2026-04-09
+
+### Fixed
+- **Webview Buttons Not Working**: Replaced all inline `onclick`/`oninput` handlers with CSP-safe `data-action` event delegation in notebook editor and query results views.
+- **Measurements Not Displayed**: Fixed SHOW TABLES to use `FROM` clause instead of `x-arc-database` header (Arc ignores the header for SHOW commands). Added column-name-based response parsing for robustness.
+- **Queries Failing with x-arc-database Header**: User-written queries (editor, alerts, notebooks) no longer send the `x-arc-database` header, since Arc rejects `database.table` syntax when the header is set. The header is only sent for extension-generated queries using short table names.
+- **Show Measurements Command**: Now passes the active database to `getMeasurements()`.
+- **Quoted Identifiers Removed**: Arc's SQL parser doesn't support standard SQL quoted identifiers, so `quoteIdentifier()` is no longer used in query generation.
+
 ## [0.3.0] - 2026-04-09
 
 ### Added

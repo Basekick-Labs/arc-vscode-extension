@@ -10,6 +10,7 @@ import {
   QueryRequest,
   MeasurementInfo
 } from '../types';
+import { quoteIdentifier } from '../utils/sqlUtils.js';
 
 export class ArcClient {
   private client: AxiosInstance;
@@ -204,19 +205,26 @@ export class ArcClient {
    */
   async getMeasurements(database?: string): Promise<MeasurementInfo[]> {
     try {
-      // Use SHOW TABLES with x-arc-database header for database context
-      const headers: Record<string, string> = {};
-      if (database) {
-        headers['x-arc-database'] = database;
-      }
-      const response = await this.client.post('/api/v1/query', { sql: 'SHOW TABLES;' }, { headers });
+      // SHOW TABLES ignores x-arc-database header -- must use FROM clause.
+      // Arc's regex only accepts unquoted identifiers ([\w-]+), and database
+      // names come from SHOW DATABASES (server-controlled), so no injection risk.
+      const sql = database ? `SHOW TABLES FROM ${database};` : 'SHOW TABLES;';
+      const response = await this.client.post('/api/v1/query', { sql });
       const responseData = response.data;
 
-      // Response format: { data: [[db, table_name, path, ...], ...] }
+      const columns: string[] = responseData.columns || [];
       const rows = responseData.data || responseData.rows || [];
       if (Array.isArray(rows) && rows.length > 0) {
-        // SHOW TABLES returns multiple columns, table name is in column 1 (index 1)
-        return rows.map((row: any[]) => ({ name: row[1] || row[0] }));
+        // Find the table name column by header; fall back to positional heuristic
+        const nameIdx = columns.findIndex(c =>
+          c.toLowerCase() === 'table_name' || c.toLowerCase() === 'name'
+        );
+        if (nameIdx >= 0) {
+          return rows.map((row: any[]) => ({ name: row[nameIdx] }));
+        }
+        // Fallback: if multiple columns, table name is typically index 1; if single column, index 0
+        const idx = rows[0].length > 1 ? 1 : 0;
+        return rows.map((row: any[]) => ({ name: row[idx] }));
       }
 
       return [];

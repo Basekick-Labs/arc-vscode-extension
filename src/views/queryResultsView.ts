@@ -222,10 +222,10 @@ export class QueryResultsView {
             ${executionTime ? `<div class="stat">Execution Time: <span class="stat-value">${executionTime.toFixed(2)}ms</span></div>` : ''}
         </div>
         <div class="export-buttons">
-            <button onclick="exportCSV()">📥 Export to CSV</button>
-            <button onclick="exportJSON()">📥 Export to JSON</button>
-            <button onclick="copyMarkdown()">📋 Copy as Markdown</button>
-            <button onclick="toggleChart()">📊 Toggle Chart</button>
+            <button data-action="exportCSV">📥 Export to CSV</button>
+            <button data-action="exportJSON">📥 Export to JSON</button>
+            <button data-action="copyMarkdown">📋 Copy as Markdown</button>
+            <button data-action="toggleChart">📊 Toggle Chart</button>
         </div>
     </div>
     <div id="chart-container" style="display: none; margin: 20px 0;">
@@ -251,6 +251,18 @@ export class QueryResultsView {
         };
 
         let chartInstance = null;
+
+        // Event delegation for CSP-safe button handling
+        document.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            switch (btn.dataset.action) {
+                case 'exportCSV': exportCSV(); break;
+                case 'exportJSON': exportJSON(); break;
+                case 'copyMarkdown': copyMarkdown(); break;
+                case 'toggleChart': toggleChart(); break;
+            }
+        });
 
         function exportCSV() {
             vscode.postMessage({

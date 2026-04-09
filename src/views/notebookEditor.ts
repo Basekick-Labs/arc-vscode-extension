@@ -93,6 +93,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     try {
       // Execute the SQL query
+      // User-written queries may use database.table syntax, so don't send
+      // x-arc-database header (Arc rejects cross-database syntax with header)
       const config = vscode.workspace.getConfiguration('arc');
       const format = config.get<'json' | 'arrow'>('resultFormat', 'json');
       const results = await client.executeQuery({ query, format });
@@ -346,17 +348,17 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     <div class="variables-section">
         <h3>📌 Variables</h3>
         <div id="variables-list"></div>
-        <button onclick="addVariable()" style="margin-top: 10px;">+ Add Variable</button>
+        <button data-action="addVariable" style="margin-top: 10px;">+ Add Variable</button>
         <div class="variables-help">
             Use variables in SQL queries with <code>\${variableName}</code> syntax. Example: <code>SELECT * FROM table WHERE id = \${id}</code>
         </div>
     </div>
 
     <div class="add-cell-bar">
-        <button onclick="addCell('markdown')">+ Markdown Cell</button>
-        <button onclick="addCell('sql')">+ SQL Cell</button>
-        <button onclick="runAll()">▶️ Run All SQL Cells</button>
-        <button onclick="exportMarkdown()">📄 Export to Markdown</button>
+        <button data-action="addCell" data-type="markdown">+ Markdown Cell</button>
+        <button data-action="addCell" data-type="sql">+ SQL Cell</button>
+        <button data-action="runAll">▶️ Run All SQL Cells</button>
+        <button data-action="exportMarkdown">📄 Export to Markdown</button>
     </div>
 
     <div id="cells">
@@ -371,6 +373,29 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         if (!notebook.globalVariables) {
             notebook.globalVariables = {};
         }
+
+        // CSP-safe event delegation for buttons
+        document.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            const action = btn.dataset.action;
+            const index = parseInt(btn.dataset.index);
+            switch (action) {
+                case 'addVariable': addVariable(); break;
+                case 'addCell': addCell(btn.dataset.type); break;
+                case 'runAll': runAll(); break;
+                case 'exportMarkdown': exportMarkdown(); break;
+                case 'executeCell': executeCell(index); break;
+                case 'deleteCell': deleteCell(index); break;
+            }
+        });
+
+        // CSP-safe event delegation for textarea input
+        document.addEventListener('input', (e) => {
+            if (e.target.matches('textarea[data-cell-index]')) {
+                onCellChange(parseInt(e.target.dataset.cellIndex));
+            }
+        });
 
         // Render variables on load
         window.addEventListener('load', () => {
@@ -643,12 +668,12 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         <div class="cell-toolbar">
           <span class="cell-type">${cell.type}</span>
           <div class="cell-actions">
-            ${cell.type === 'sql' ? '<button onclick="executeCell(' + index + ')">▶️ Run</button>' : ''}
-            <button onclick="deleteCell(${index})">🗑️ Delete</button>
+            ${cell.type === 'sql' ? `<button data-action="executeCell" data-index="${index}">▶️ Run</button>` : ''}
+            <button data-action="deleteCell" data-index="${index}">🗑️ Delete</button>
           </div>
         </div>
         <div class="cell-content ${cellClass}">
-          <textarea oninput="onCellChange(${index})" rows="${Math.max(3, content.split('\n').length)}">${escapeHtml(content)}</textarea>
+          <textarea data-cell-index="${index}" rows="${Math.max(3, content.split('\n').length)}">${escapeHtml(content)}</textarea>
         </div>
         ${outputHtml}
       </div>
