@@ -7,10 +7,12 @@ import { ArcQueriesProvider } from '../providers/arcQueriesProvider';
 import { QueryResultsView } from '../views/queryResultsView';
 import { QueryStorage } from '../utils/queryStorage';
 import { ArcConnection } from '../types';
+import { ArcClient } from '../api/arcClient';
 import { CSVImporter } from '../utils/csvImporter';
 import { DataGenerator } from '../utils/dataGenerator';
 import { AlertManager } from '../utils/alertManager';
 import { ArcAlertsProvider } from '../providers/arcAlertsProvider';
+import { quoteIdentifier } from '../utils/sqlUtils';
 
 export class ArcCommands {
   private tokensProvider?: ArcTokensProvider;
@@ -37,6 +39,17 @@ export class ArcCommands {
   setAlertsProvider(provider: ArcAlertsProvider, manager: AlertManager) {
     this.alertsProvider = provider;
     this.alertManager = manager;
+  }
+
+  /**
+   * Check that we have an active connection and return the client, or show a warning.
+   */
+  private requireConnectedClient(): ArcClient | undefined {
+    if (!this.connectionManager.isConnected()) {
+      vscode.window.showWarningMessage('Please connect to an Arc server first');
+      return undefined;
+    }
+    return this.connectionManager.getActiveClient();
   }
 
   /**
@@ -115,10 +128,7 @@ export class ArcCommands {
           cancellable: false
         },
         async () => {
-          const client = await this.connectionManager.setActiveConnection(connection.id);
-
-          // Test connection
-          await client.healthCheck();
+          await this.connectionManager.setActiveConnection(connection.id);
         }
       );
 
@@ -132,18 +142,6 @@ export class ArcCommands {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('Connection error details:', error);
       vscode.window.showErrorMessage(`Failed to connect: ${message}`);
-
-      // Show additional details if available
-      if (error && typeof error === 'object') {
-        const errorObj = error as any;
-        if (errorObj.code === 'ECONNREFUSED') {
-          vscode.window.showErrorMessage('Cannot reach the server. Please check the host and port.');
-        } else if (errorObj.statusCode === 401) {
-          vscode.window.showErrorMessage('Authentication failed. Please check your token.');
-        } else if (errorObj.code === 'ENOTFOUND') {
-          vscode.window.showErrorMessage('Server hostname not found. Please check the host address.');
-        }
-      }
     }
   }
 
@@ -169,8 +167,7 @@ export class ArcCommands {
           cancellable: false
         },
         async () => {
-          const client = await this.connectionManager.setActiveConnection(connection.id);
-          await client.healthCheck();
+          await this.connectionManager.setActiveConnection(connection.id);
         }
       );
 
@@ -184,18 +181,6 @@ export class ArcCommands {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('Connection activation error details:', error);
       vscode.window.showErrorMessage(`Failed to connect to ${connection.name}: ${message}`);
-
-      // Show additional details if available
-      if (error && typeof error === 'object') {
-        const errorObj = error as any;
-        if (errorObj.code === 'ECONNREFUSED') {
-          vscode.window.showErrorMessage('Cannot reach the server. Please check the host and port.');
-        } else if (errorObj.statusCode === 401) {
-          vscode.window.showErrorMessage('Authentication failed. Please check your token.');
-        } else if (errorObj.code === 'ENOTFOUND') {
-          vscode.window.showErrorMessage('Server hostname not found. Please check the host address.');
-        }
-      }
     }
   }
 
@@ -391,10 +376,8 @@ export class ArcCommands {
    */
   async createToken(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const name = await vscode.window.showInputBox({
         prompt: 'Token name',
@@ -409,11 +392,6 @@ export class ArcCommands {
         prompt: 'Token description (optional)',
         placeHolder: 'VS Code Extension Token'
       });
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
 
       const response = await client.createToken({ name, description });
 
@@ -445,15 +423,8 @@ export class ArcCommands {
    */
   async verifyToken(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const response = await client.verifyToken();
 
@@ -486,10 +457,8 @@ export class ArcCommands {
    */
   async executeQuery(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -511,11 +480,6 @@ export class ArcCommands {
         return;
       }
 
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
-
       // Execute query with progress
       const startTime = Date.now();
       let results;
@@ -530,7 +494,10 @@ export class ArcCommands {
             cancellable: false
           },
           async () => {
-            return await client.executeQuery({ query, format: 'json' });
+            const config = vscode.workspace.getConfiguration('arc');
+            const format = config.get<'json' | 'arrow'>('resultFormat', 'json');
+            const database = this.connectionManager.getActiveDatabase();
+            return await client.executeQuery({ query, format, database });
           }
         );
 
@@ -584,15 +551,8 @@ export class ArcCommands {
    */
   async showMeasurements(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const measurements = await client.getMeasurements();
       const names = measurements.map(m => m.name).join('\n');
@@ -615,10 +575,8 @@ export class ArcCommands {
    */
   async insertTestData(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const measurement = await vscode.window.showInputBox({
         prompt: 'Measurement name',
@@ -626,11 +584,6 @@ export class ArcCommands {
       });
 
       if (!measurement) {
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
         return;
       }
 
@@ -681,15 +634,8 @@ export class ArcCommands {
    */
   async showHealth(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const health = await client.healthCheck();
       const healthText = JSON.stringify(health, null, 2);
@@ -712,15 +658,8 @@ export class ArcCommands {
    */
   async showMetrics(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const metrics = await client.getMetrics();
       const metricsText = JSON.stringify(metrics, null, 2);
@@ -743,10 +682,8 @@ export class ArcCommands {
    */
   async createServerToken(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const name = await vscode.window.showInputBox({
         prompt: 'Token name',
@@ -761,11 +698,6 @@ export class ArcCommands {
         prompt: 'Token description (optional)',
         placeHolder: 'Token for API access'
       });
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
 
       const response = await client.createToken({ name, description });
 
@@ -796,10 +728,8 @@ export class ArcCommands {
    */
   async deleteServerToken(tokenItem: any): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const tokenData = tokenItem?.tokenData || tokenItem;
 
@@ -815,11 +745,6 @@ export class ArcCommands {
       );
 
       if (confirm !== 'Delete') {
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
         return;
       }
 
@@ -843,10 +768,8 @@ export class ArcCommands {
    */
   async rotateServerToken(tokenItem: any): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const tokenData = tokenItem?.tokenData || tokenItem;
 
@@ -862,11 +785,6 @@ export class ArcCommands {
       );
 
       if (confirm !== 'Rotate') {
-        return;
-      }
-
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
         return;
       }
 
@@ -1088,10 +1006,8 @@ export class ArcCommands {
    */
   async showTableSchema(treeItem: any): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
       const database = treeItem?.metadata?.database || treeItem?.database;
@@ -1101,14 +1017,8 @@ export class ArcCommands {
         return;
       }
 
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
-
       // Use DESCRIBE SELECT to get schema (DuckDB compatible)
-      const fullTableName = database ? `${database}.${tableName}` : tableName;
-      const schemaQuery = `DESCRIBE SELECT * FROM ${fullTableName} LIMIT 1`;
+      const schemaQuery = `DESCRIBE SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 1`;
 
       const results = await vscode.window.withProgress(
         {
@@ -1117,7 +1027,7 @@ export class ArcCommands {
           cancellable: false
         },
         async () => {
-          return await client.executeQuery({ query: schemaQuery, format: 'json' });
+          return await client.executeQuery({ query: schemaQuery, format: 'json', database });
         }
       );
 
@@ -1141,10 +1051,8 @@ export class ArcCommands {
    */
   async previewTableData(treeItem: any): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
       const database = treeItem?.metadata?.database || treeItem?.database;
@@ -1154,13 +1062,7 @@ export class ArcCommands {
         return;
       }
 
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
-
-      const fullTableName = database ? `${database}.${tableName}` : tableName;
-      const query = `SELECT * FROM ${fullTableName} LIMIT 10`;
+      const query = `SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 10`;
 
       const results = await vscode.window.withProgress(
         {
@@ -1169,7 +1071,7 @@ export class ArcCommands {
           cancellable: false
         },
         async () => {
-          return await client.executeQuery({ query, format: 'json' });
+          return await client.executeQuery({ query, format: 'json', database });
         }
       );
 
@@ -1186,10 +1088,8 @@ export class ArcCommands {
    */
   async showTableStats(treeItem: any): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showWarningMessage('Please connect to an Arc server first');
-        return;
-      }
+      const client = this.requireConnectedClient();
+      if (!client) { return; }
 
       const tableName = treeItem?.metadata?.measurement || treeItem?.table || treeItem?.label;
       const database = treeItem?.metadata?.database || treeItem?.database;
@@ -1199,20 +1099,13 @@ export class ArcCommands {
         return;
       }
 
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return;
-      }
-
-      const fullTableName = database ? `${database}.${tableName}` : tableName;
-
       // Get row count and other stats
       const statsQuery = `
         SELECT
           COUNT(*) as row_count,
           MIN(time) as earliest_timestamp,
           MAX(time) as latest_timestamp
-        FROM ${fullTableName}
+        FROM ${quoteIdentifier(tableName)}
       `;
 
       const results = await vscode.window.withProgress(
@@ -1222,7 +1115,7 @@ export class ArcCommands {
           cancellable: false
         },
         async () => {
-          return await client.executeQuery({ query: statsQuery, format: 'json' });
+          return await client.executeQuery({ query: statsQuery, format: 'json', database });
         }
       );
 
@@ -1252,8 +1145,10 @@ export class ArcCommands {
       return;
     }
 
-    // Always include database prefix if available
-    const fullTableName = database ? `${database}.${tableName}` : tableName;
+    // Include database prefix with proper quoting for editor-opened queries
+    const fullTableName = database
+      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
+      : quoteIdentifier(tableName);
     const query = `SELECT * FROM ${fullTableName} LIMIT 100;`;
 
     await this.openQuery(query);
@@ -1270,7 +1165,9 @@ export class ArcCommands {
       return;
     }
 
-    const fullTableName = database ? `${database}.${tableName}` : tableName;
+    const fullTableName = database
+      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
+      : quoteIdentifier(tableName);
     const query = `SELECT * FROM ${fullTableName}
 WHERE time > NOW() - INTERVAL '1 hour'
 ORDER BY time DESC
@@ -1290,7 +1187,9 @@ LIMIT 1000;`;
       return;
     }
 
-    const fullTableName = database ? `${database}.${tableName}` : tableName;
+    const fullTableName = database
+      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
+      : quoteIdentifier(tableName);
     const query = `SELECT * FROM ${fullTableName}
 WHERE time >= CURRENT_DATE
 ORDER BY time DESC
@@ -1384,10 +1283,7 @@ LIMIT 1000;`;
    */
   async importCSV(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showErrorMessage('Not connected to Arc server');
-        return;
-      }
+      if (!this.requireConnectedClient()) { return; }
 
       const activeConnection = this.connectionManager.getActiveConnection();
       if (!activeConnection) {
@@ -1428,10 +1324,7 @@ LIMIT 1000;`;
    */
   async generateTestData(): Promise<void> {
     try {
-      if (!this.connectionManager.isConnected()) {
-        vscode.window.showErrorMessage('Not connected to Arc server');
-        return;
-      }
+      if (!this.requireConnectedClient()) { return; }
 
       const activeConnection = this.connectionManager.getActiveConnection();
       if (!activeConnection) {

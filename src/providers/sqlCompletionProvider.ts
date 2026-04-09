@@ -2,7 +2,23 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../utils/connectionManager';
 
 export class SqlCompletionProvider implements vscode.CompletionItemProvider {
+  private databaseCache: vscode.CompletionItem[] | null = null;
+  private tableCache: vscode.CompletionItem[] | null = null;
+  private cacheTimestamp: number = 0;
+  private refreshPromise: Promise<void> | null = null;
+  private static readonly CACHE_TTL_MS = 30_000;
+
   constructor(private connectionManager: ConnectionManager) {}
+
+  /**
+   * Clear cached completions (call when connection changes or explorer refreshes)
+   */
+  clearCache(): void {
+    this.databaseCache = null;
+    this.tableCache = null;
+    this.cacheTimestamp = 0;
+    this.refreshPromise = null;
+  }
 
   async provideCompletionItems(
     document: vscode.TextDocument,
@@ -10,7 +26,6 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
     token: vscode.CancellationToken,
     context: vscode.CompletionContext
   ): Promise<vscode.CompletionItem[]> {
-    const linePrefix = document.lineAt(position).text.substr(0, position.character);
     const items: vscode.CompletionItem[] = [];
 
     // Add SQL keywords
@@ -19,11 +34,18 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
     // Add DuckDB/Arc specific functions
     items.push(...this.getDuckDbFunctions());
 
-    // Add table/database completions if connected
+    // Add table/database completions if connected (with caching)
     if (this.connectionManager.isConnected()) {
+      if (token.isCancellationRequested) { return items; }
+
       try {
-        items.push(...await this.getDatabaseCompletions());
-        items.push(...await this.getTableCompletions());
+        await this.ensureCachePopulated();
+        if (this.databaseCache) {
+          items.push(...this.databaseCache);
+        }
+        if (this.tableCache) {
+          items.push(...this.tableCache);
+        }
       } catch (error) {
         // Silently fail if can't get completions
       }
@@ -33,6 +55,87 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
     items.push(...this.getSnippets());
 
     return items;
+  }
+
+  private async ensureCachePopulated(): Promise<void> {
+    const now = Date.now();
+    if (this.databaseCache && this.tableCache && (now - this.cacheTimestamp) < SqlCompletionProvider.CACHE_TTL_MS) {
+      return; // Cache is fresh
+    }
+
+    // Deduplicate concurrent refreshes
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
+    this.refreshPromise = this.refreshCache();
+    try {
+      await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+
+  private async refreshCache(): Promise<void> {
+    const client = this.connectionManager.getActiveClient();
+    if (!client) { return; }
+
+    // Fetch databases
+    try {
+      const result = await client.executeQuery({
+        query: 'SHOW DATABASES',
+        format: 'json'
+      });
+
+      this.databaseCache = result.rows.map((row: any) => {
+        const dbName = row[0];
+        const item = new vscode.CompletionItem(dbName, vscode.CompletionItemKind.Module);
+        item.detail = 'Database';
+        item.insertText = dbName;
+        return item;
+      });
+    } catch {
+      this.databaseCache = [];
+    }
+
+    // Fetch tables from all databases
+    const activeDatabase = this.connectionManager.getActiveDatabase();
+    const tableItems: vscode.CompletionItem[] = [];
+
+    if (this.databaseCache) {
+      for (const dbItem of this.databaseCache) {
+        const dbName = dbItem.label as string;
+        try {
+          const tables = await client.executeQuery({
+            query: `SHOW TABLES FROM ${dbName}`,
+            format: 'json'
+          });
+
+          for (const tableRow of tables.rows) {
+            const tableName = tableRow[1]; // table_name is column index 1
+            const fullName = `${dbName}.${tableName}`;
+
+            const item = new vscode.CompletionItem(fullName, vscode.CompletionItemKind.Class);
+            item.detail = `Table in ${dbName}`;
+            item.insertText = fullName;
+            item.sortText = `1_${fullName}`;
+            tableItems.push(item);
+
+            // Short form - higher priority when active database matches
+            const shortItem = new vscode.CompletionItem(tableName, vscode.CompletionItemKind.Class);
+            shortItem.detail = `Table (${dbName})`;
+            shortItem.insertText = tableName;
+            shortItem.sortText = activeDatabase === dbName ? `0_${tableName}` : `1_${tableName}`;
+            tableItems.push(shortItem);
+          }
+        } catch {
+          // Skip if can't get tables for this database
+        }
+      }
+    }
+
+    this.tableCache = tableItems;
+    this.cacheTimestamp = Date.now();
   }
 
   private getSqlKeywords(): vscode.CompletionItem[] {
@@ -95,81 +198,6 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
       item.insertText = new vscode.SnippetString(func.snippet);
       return item;
     });
-  }
-
-  private async getDatabaseCompletions(): Promise<vscode.CompletionItem[]> {
-    try {
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return [];
-      }
-
-      const result = await client.executeQuery({
-        query: 'SHOW DATABASES',
-        format: 'json'
-      });
-
-      return result.rows.map((row: any) => {
-        const dbName = row[0];
-        const item = new vscode.CompletionItem(dbName, vscode.CompletionItemKind.Module);
-        item.detail = 'Database';
-        item.insertText = dbName;
-        return item;
-      });
-    } catch {
-      return [];
-    }
-  }
-
-  private async getTableCompletions(): Promise<vscode.CompletionItem[]> {
-    try {
-      const client = this.connectionManager.getActiveClient();
-      if (!client) {
-        return [];
-      }
-
-      const databases = await client.executeQuery({
-        query: 'SHOW DATABASES',
-        format: 'json'
-      });
-
-      const items: vscode.CompletionItem[] = [];
-
-      for (const dbRow of databases.rows) {
-        const dbName = dbRow[0];
-
-        try {
-          const tables = await client.executeQuery({
-            query: `SHOW TABLES FROM ${dbName}`,
-            format: 'json'
-          });
-
-          for (const tableRow of tables.rows) {
-            const tableName = tableRow[1]; // table_name is column index 1
-            const fullName = `${dbName}.${tableName}`;
-
-            const item = new vscode.CompletionItem(fullName, vscode.CompletionItemKind.Class);
-            item.detail = `Table in ${dbName}`;
-            item.insertText = fullName;
-            item.sortText = `1_${fullName}`; // Tables appear before keywords
-            items.push(item);
-
-            // Also add just table name
-            const shortItem = new vscode.CompletionItem(tableName, vscode.CompletionItemKind.Class);
-            shortItem.detail = `Table (${dbName})`;
-            shortItem.insertText = tableName;
-            shortItem.sortText = `1_${tableName}`;
-            items.push(shortItem);
-          }
-        } catch {
-          // Skip if can't get tables for this database
-        }
-      }
-
-      return items;
-    } catch {
-      return [];
-    }
   }
 
   private getSnippets(): vscode.CompletionItem[] {

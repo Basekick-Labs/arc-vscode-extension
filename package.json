@@ -2,7 +2,7 @@
   "name": "arc-db-manager",
   "displayName": "Arc Database Manager",
   "description": "Complete development toolkit for Arc Database - SQL queries, notebooks, data ingestion, monitoring, and more",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "basekick-labs",
   "icon": "resources/icon.png",
   "repository": {
@@ -524,6 +524,7 @@
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
+    "apache-arrow": "^17.0.0",
     "axios": "^1.6.5"
   }
 }

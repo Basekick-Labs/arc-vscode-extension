@@ -6,6 +6,7 @@ export class ConnectionManager {
   private static instance: ConnectionManager;
   private activeConnection?: ArcConnection;
   private activeClient?: ArcClient;
+  private activeDatabase?: string;
   private connections: Map<string, ArcConnection> = new Map();
   private secrets: vscode.SecretStorage;
   private context: vscode.ExtensionContext;
@@ -98,9 +99,12 @@ export class ConnectionManager {
     }
 
     this.activeConnection = connection;
+    this.activeDatabase = connection.database;
 
     const token = await this.getToken(connectionId);
-    this.activeClient = new ArcClient(connection, token);
+    const config = vscode.workspace.getConfiguration('arc');
+    const timeout = config.get<number>('queryTimeout', 30000);
+    this.activeClient = new ArcClient(connection, token, timeout);
 
     // Verify connection works
     await this.activeClient.healthCheck();
@@ -123,11 +127,26 @@ export class ConnectionManager {
   }
 
   /**
+   * Get the active database
+   */
+  getActiveDatabase(): string | undefined {
+    return this.activeDatabase;
+  }
+
+  /**
+   * Set the active database
+   */
+  setActiveDatabase(database: string): void {
+    this.activeDatabase = database;
+  }
+
+  /**
    * Disconnect (clear active connection)
    */
   disconnect(): void {
     this.activeConnection = undefined;
     this.activeClient = undefined;
+    this.activeDatabase = undefined;
   }
 
   /**

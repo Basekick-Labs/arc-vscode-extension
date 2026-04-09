@@ -10,6 +10,7 @@ import { ArcNotebookEditorProvider } from './views/notebookEditor';
 import { QueryStorage } from './utils/queryStorage';
 import { AlertManager } from './utils/alertManager';
 import { ArcCommands } from './commands/arcCommands';
+import { QueryResultsView } from './views/queryResultsView';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Arc Database Manager extension is now active');
@@ -17,6 +18,9 @@ export function activate(context: vscode.ExtensionContext) {
   try {
   // Initialize connection manager
   const connectionManager = ConnectionManager.initialize(context);
+
+  // Initialize query results view with extension URI for bundled resources
+  QueryResultsView.initialize(context.extensionUri);
 
   // Initialize query storage
   const queryStorage = new QueryStorage(context);
@@ -69,8 +73,9 @@ export function activate(context: vscode.ExtensionContext) {
   const updateStatusBar = () => {
     if (connectionManager.isConnected()) {
       const connection = connectionManager.getActiveConnection();
-      statusBarItem.text = `$(database) Arc: ${connection?.name}`;
-      statusBarItem.tooltip = `Connected to ${connection?.protocol}://${connection?.host}:${connection?.port}`;
+      const activeDb = connectionManager.getActiveDatabase();
+      statusBarItem.text = `$(database) Arc: ${connection?.name}${activeDb ? ` [${activeDb}]` : ''}`;
+      statusBarItem.tooltip = `Connected to ${connection?.protocol}://${connection?.host}:${connection?.port}${activeDb ? `\nDatabase: ${activeDb}` : ''}`;
       statusBarItem.backgroundColor = undefined;
     } else {
       statusBarItem.text = '$(debug-disconnect) Arc: Not Connected';

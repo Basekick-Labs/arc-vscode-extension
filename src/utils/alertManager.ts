@@ -28,6 +28,7 @@ export class AlertManager {
   private timers: Map<string, NodeJS.Timeout> = new Map();
   private triggers: AlertTrigger[] = [];
   private maxTriggerHistory = 100;
+  private static readonly MIN_CHECK_INTERVAL_MS = 10_000;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -54,6 +55,7 @@ export class AlertManager {
     const newAlert: Alert = {
       ...alert,
       id: this.generateId(),
+      checkIntervalMs: Math.max(alert.checkIntervalMs, AlertManager.MIN_CHECK_INTERVAL_MS),
       triggeredCount: 0,
       createdAt: Date.now()
     };
@@ -77,8 +79,11 @@ export class AlertManager {
     // Stop if running
     this.stopAlert(id);
 
-    // Update alert
+    // Update alert with minimum interval enforcement
     Object.assign(alert, updates);
+    if (alert.checkIntervalMs < AlertManager.MIN_CHECK_INTERVAL_MS) {
+      alert.checkIntervalMs = AlertManager.MIN_CHECK_INTERVAL_MS;
+    }
     await this.saveAlerts();
 
     // Restart if enabled
@@ -113,8 +118,12 @@ export class AlertManager {
     // Stop existing timer if any
     this.stopAlert(alert.id);
 
-    // Create new timer
+    // Create new timer with self-cleanup guard
     const timer = setInterval(async () => {
+      if (!this.alerts.find(a => a.id === alert.id)) {
+        this.stopAlert(alert.id);
+        return;
+      }
       await this.checkAlert(alert);
     }, alert.checkIntervalMs);
 
@@ -204,9 +213,9 @@ export class AlertManager {
       case 'less_than':
         return Number(value) < Number(threshold);
       case 'equals':
-        return value == threshold;
+        return String(value) === String(threshold);
       case 'not_equals':
-        return value != threshold;
+        return String(value) !== String(threshold);
       case 'contains':
         return String(value).includes(String(threshold));
       default:

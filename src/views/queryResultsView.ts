@@ -1,10 +1,19 @@
 import * as vscode from 'vscode';
 import { ArcQueryResult } from '../types';
+import { escapeHtml } from '../utils/sqlUtils';
 
 export class QueryResultsView {
   private static currentPanel: QueryResultsView | undefined;
+  private static extensionUri: vscode.Uri;
   private readonly panel: vscode.WebviewPanel;
   private disposables: vscode.Disposable[] = [];
+
+  /**
+   * Must be called once during extension activation to set the extension URI.
+   */
+  public static initialize(extensionUri: vscode.Uri): void {
+    QueryResultsView.extensionUri = extensionUri;
+  }
 
   private constructor(panel: vscode.WebviewPanel) {
     this.panel = panel;
@@ -46,7 +55,8 @@ export class QueryResultsView {
         column || vscode.ViewColumn.Two,
         {
           enableScripts: true,
-          retainContextWhenHidden: true
+          retainContextWhenHidden: true,
+          localResourceRoots: [vscode.Uri.joinPath(QueryResultsView.extensionUri, 'resources')]
         }
       );
 
@@ -60,17 +70,33 @@ export class QueryResultsView {
     this.panel.webview.html = this.getHtmlContent(results, query);
   }
 
+  private getNonce(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let nonce = '';
+    for (let i = 0; i < 32; i++) {
+      nonce += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return nonce;
+  }
+
   private getHtmlContent(results: ArcQueryResult, query: string): string {
     const { columns, rows, rowCount, executionTime } = results;
+    const webview = this.panel.webview;
+    const nonce = this.getNonce();
+
+    // Build URI for bundled Chart.js
+    const chartJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(QueryResultsView.extensionUri, 'resources', 'chart.umd.min.js')
+    );
 
     // Generate table headers
-    const headerRow = columns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('');
+    const headerRow = columns.map(col => `<th>${escapeHtml(col)}</th>`).join('');
 
     // Generate table rows
     const dataRows = rows.slice(0, 1000).map(row => {
       const cells = row.map(cell => {
         const value = cell === null ? '<i>null</i>' : String(cell);
-        return `<td>${this.escapeHtml(value)}</td>`;
+        return `<td>${escapeHtml(value)}</td>`;
       }).join('');
       return `<tr>${cells}</tr>`;
     }).join('');
@@ -82,6 +108,7 @@ export class QueryResultsView {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource}; img-src ${webview.cspSource} data:;">
     <title>Query Results</title>
     <style>
         body {
@@ -188,7 +215,7 @@ export class QueryResultsView {
 <body>
     <div class="query-info">
         <h2>Query Results</h2>
-        <div class="query-text">${this.escapeHtml(query)}</div>
+        <div class="query-text">${escapeHtml(query)}</div>
         <div class="stats">
             <div class="stat">Rows: <span class="stat-value">${rowCount}</span></div>
             <div class="stat">Columns: <span class="stat-value">${columns.length}</span></div>
@@ -215,8 +242,8 @@ export class QueryResultsView {
             </tbody>
         </table>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script>
+    <script nonce="${nonce}" src="${chartJsUri}"></script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const resultsData = {
             columns: ${JSON.stringify(columns)},
@@ -395,17 +422,6 @@ export class QueryResultsView {
     </script>
 </body>
 </html>`;
-  }
-
-  private escapeHtml(text: string): string {
-    const map: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, m => map[m]);
   }
 
   private async exportToCSV(data: { columns: string[], rows: any[][] }): Promise<void> {
