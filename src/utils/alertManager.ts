@@ -198,7 +198,10 @@ export class AlertManager {
           'Dismiss'
         ).then(action => {
           if (action === 'View Alerts') {
-            vscode.commands.executeCommand('arc.showAlerts');
+            // Reveal the Alerts tree view. The previous target, 'arc.showAlerts',
+            // was never registered, so this button always failed with
+            // "command not found".
+            vscode.commands.executeCommand('arcAlerts.focus');
           }
         });
       }

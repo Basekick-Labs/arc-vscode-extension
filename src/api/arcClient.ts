@@ -277,33 +277,57 @@ export class ArcClient {
   }
 
   /**
-   * Write data using MessagePack columnar format (highest performance)
-   * Note: This is a simplified version - full implementation needs msgpack encoding
+   * Write data points using Arc's MessagePack columnar format.
+   *
+   * Previously this built line protocol by string concatenation with no
+   * escaping, so any tag or field value containing a space, comma, '=' or
+   * quote produced a malformed line -- silently corrupting data, or splitting
+   * a value into extra tags. msgpack carries values as typed data instead, so
+   * there is nothing to escape and nothing to get wrong. It is also the format
+   * CSVImporter already uses, and the faster path on the Arc side.
+   *
+   * Timestamps are passed through untouched: Arc auto-detects seconds,
+   * milliseconds, microseconds or nanoseconds from magnitude.
    */
   async writeData(measurement: string, data: any[], database?: string): Promise<void> {
     try {
-      // For now, use line protocol format as it's simpler
-      // Full msgpack implementation would require @msgpack/msgpack library
-      const lines = data.map(point => {
-        const tags = point.tags ? Object.entries(point.tags)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(',') : '';
+      if (data.length === 0) {
+        return;
+      }
 
-        const fields = Object.entries(point.fields)
-          .map(([k, v]) => `${k}=${typeof v === 'string' ? `"${v}"` : v}`)
-          .join(',');
+      // Row-wise input -> columnar. Every column must be the same length, so
+      // collect the full key set first and pad rows that omit a key with null.
+      const tagKeys = new Set<string>();
+      const fieldKeys = new Set<string>();
+      for (const point of data) {
+        Object.keys(point.tags ?? {}).forEach(k => tagKeys.add(k));
+        Object.keys(point.fields ?? {}).forEach(k => fieldKeys.add(k));
+      }
 
-        const timestamp = point.timestamp || Date.now() * 1000000; // nanoseconds
+      const columns: Record<string, any[]> = {
+        time: data.map(p => p.timestamp ?? Date.now())
+      };
+      for (const key of tagKeys) {
+        columns[key] = data.map(p => p.tags?.[key] ?? null);
+      }
+      for (const key of fieldKeys) {
+        // A field colliding with a tag name would otherwise overwrite it
+        // silently; keep the tag and surface the conflict.
+        if (key in columns) {
+          throw new Error(`Column "${key}" is used as both a tag and a field`);
+        }
+        columns[key] = data.map(p => p.fields?.[key] ?? null);
+      }
 
-        return `${measurement}${tags ? ',' + tags : ''} ${fields} ${timestamp}`;
-      }).join('\n');
+      const { encode } = await import('@msgpack/msgpack');
+      const payload = encode({ m: measurement, columns });
 
-      const writeHeaders: Record<string, string> = { 'Content-Type': 'text/plain' };
+      const writeHeaders: Record<string, string> = { 'Content-Type': 'application/msgpack' };
       if (database) {
         writeHeaders['x-arc-database'] = database;
       }
 
-      await this.client.post('/api/v1/write/line-protocol', lines, {
+      await this.client.post('/api/v1/write/msgpack', payload, {
         headers: writeHeaders
       });
     } catch (error) {
