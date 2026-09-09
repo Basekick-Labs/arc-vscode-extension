@@ -11,6 +11,7 @@ import { QueryStorage } from './utils/queryStorage';
 import { AlertManager } from './utils/alertManager';
 import { ArcCommands } from './commands/arcCommands';
 import { QueryResultsView } from './views/queryResultsView';
+import { TelemetryReporter } from './utils/telemetry';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Arc Database Manager extension is now active');
@@ -240,15 +241,28 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  // Start anonymous installation telemetry (respects the global VS Code
+  // telemetry setting and arc.telemetry.enabled; see utils/telemetry.ts)
+  const telemetry = new TelemetryReporter(context);
+  telemetry.start();
+  context.subscriptions.push(telemetry);
+
   // Show welcome message on first activation
   const hasShownWelcome = context.globalState.get('arc.hasShownWelcome', false);
   if (!hasShownWelcome) {
+    // First run is also where telemetry is disclosed, so the count is never
+    // collected from someone who was never told about it.
     vscode.window.showInformationMessage(
-      'Welcome to Arc Database Manager! Click "Connect" in the status bar to get started.',
-      'Connect Now'
+      'Welcome to Arc Database Manager! Click "Connect" in the status bar to get started. ' +
+        'Arc sends an anonymous daily install count (no queries, hosts, or credentials) — ' +
+        'disable it with the arc.telemetry.enabled setting.',
+      'Connect Now',
+      'Telemetry Settings'
     ).then(action => {
       if (action === 'Connect Now') {
         connectWithUpdate();
+      } else if (action === 'Telemetry Settings') {
+        vscode.commands.executeCommand('workbench.action.openSettings', 'arc.telemetry.enabled');
       }
     });
     context.globalState.update('arc.hasShownWelcome', true);
