@@ -505,8 +505,11 @@ export class ArcCommands {
         // Show results
         QueryResultsView.show(results, query);
 
+        // Arrow responses carry no server timing, so fall back to the measured
+        // round trip rather than rendering "in undefinedms".
+        const elapsed = results.executionTime ?? (Date.now() - startTime);
         vscode.window.showInformationMessage(
-          `Query executed: ${results.rowCount} rows in ${results.executionTime?.toFixed(2)}ms`
+          `Query executed: ${results.rowCount} rows in ${elapsed.toFixed(2)}ms`
         );
 
       } catch (error) {
@@ -618,7 +621,9 @@ export class ArcCommands {
           cancellable: false
         },
         async () => {
-          await client.writeData(measurement, testData);
+          // Without the active database, test data always landed in the
+          // default one regardless of what was selected in the explorer.
+          await client.writeData(measurement, testData, this.connectionManager.getActiveDatabase());
         }
       );
 
