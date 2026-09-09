@@ -10,7 +10,6 @@ import {
   QueryRequest,
   MeasurementInfo
 } from '../types';
-import { quoteIdentifier } from '../utils/sqlUtils.js';
 
 export class ArcClient {
   private client: AxiosInstance;

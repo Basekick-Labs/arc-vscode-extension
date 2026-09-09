@@ -336,6 +336,15 @@
           ],
           "default": "json",
           "description": "Default result format for queries"
+        },
+        "arc.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Send an anonymous daily beacon so Basekick Labs can count Arc extension installs and versions in use. Includes only a randomly generated install ID, the extension and editor version, and the OS name/architecture. **Never** includes queries, results, table names, server hostnames, or tokens. Also disabled automatically when `#telemetry.telemetryLevel#` is set to `off`.",
+          "tags": [
+            "telemetry",
+            "usesOnlineServices"
+          ]
         }
       }
     },

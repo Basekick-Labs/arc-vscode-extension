@@ -12,6 +12,7 @@ import { CSVImporter } from '../utils/csvImporter';
 import { DataGenerator } from '../utils/dataGenerator';
 import { AlertManager } from '../utils/alertManager';
 import { ArcAlertsProvider } from '../providers/arcAlertsProvider';
+import { quoteIdentifier } from '../utils/sqlUtils';
 
 export class ArcCommands {
   private tokensProvider?: ArcTokensProvider;
@@ -1018,8 +1019,10 @@ export class ArcCommands {
         return;
       }
 
-      // Use DESCRIBE SELECT to get schema (DuckDB compatible)
-      const schemaQuery = `DESCRIBE SELECT * FROM ${tableName} LIMIT 1`;
+      // Use DESCRIBE SELECT to get schema (DuckDB compatible).
+      // Quote the identifier: the name comes from the server's SHOW TABLES, and
+      // a hostile/compromised server must not be able to steer the SQL we run.
+      const schemaQuery = `DESCRIBE SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 1`;
 
       const results = await vscode.window.withProgress(
         {
@@ -1063,7 +1066,7 @@ export class ArcCommands {
         return;
       }
 
-      const query = `SELECT * FROM ${tableName} LIMIT 10`;
+      const query = `SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 10`;
 
       const results = await vscode.window.withProgress(
         {
@@ -1106,7 +1109,7 @@ export class ArcCommands {
           COUNT(*) as row_count,
           MIN(time) as earliest_timestamp,
           MAX(time) as latest_timestamp
-        FROM ${tableName}
+        FROM ${quoteIdentifier(tableName)}
       `;
 
       const results = await vscode.window.withProgress(
@@ -1147,7 +1150,9 @@ export class ArcCommands {
     }
 
     // Include database prefix with proper quoting for editor-opened queries
-    const fullTableName = database ? `${database}.${tableName}` : tableName;
+    const fullTableName = database
+      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
+      : quoteIdentifier(tableName);
     const query = `SELECT * FROM ${fullTableName} LIMIT 100;`;
 
     await this.openQuery(query);
@@ -1164,7 +1169,9 @@ export class ArcCommands {
       return;
     }
 
-    const fullTableName = database ? `${database}.${tableName}` : tableName;
+    const fullTableName = database
+      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
+      : quoteIdentifier(tableName);
     const query = `SELECT * FROM ${fullTableName}
 WHERE time > NOW() - INTERVAL '1 hour'
 ORDER BY time DESC
@@ -1184,7 +1191,9 @@ LIMIT 1000;`;
       return;
     }
 
-    const fullTableName = database ? `${database}.${tableName}` : tableName;
+    const fullTableName = database
+      ? `${quoteIdentifier(database)}.${quoteIdentifier(tableName)}`
+      : quoteIdentifier(tableName);
     const query = `SELECT * FROM ${fullTableName}
 WHERE time >= CURRENT_DATE
 ORDER BY time DESC
