@@ -72,6 +72,11 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         case 'exportMarkdown':
           await this.exportMarkdown(message.markdown);
           break;
+        case 'openRaw':
+          // Escape hatch from the unreadable-file view: show the raw text so
+          // the user can repair or copy out whatever survived.
+          await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
+          break;
       }
     });
 
@@ -161,6 +166,15 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     notebook: ArcNotebook,
     structural: boolean
   ): Promise<void> {
+    // Never write over a file we could not read. getHtmlContent already
+    // refuses to render an editable view in that case, so no save should
+    // arrive -- but this is the last line before the user's data is replaced,
+    // and the cost of being wrong here is losing their notebook.
+    if (!this.parseNotebook(document.getText())) {
+      console.warn('[ArcNotebook] Refusing to save over a file that could not be parsed:', document.uri.fsPath);
+      return;
+    }
+
     const json = JSON.stringify(notebook, null, 2);
 
     // Identical content produces no change event at all, which would strand
@@ -259,6 +273,90 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     }
   }
 
+  /**
+   * View shown when a non-empty file cannot be read as a notebook.
+   *
+   * Deliberately inert: it defines no notebook state, no autosave and no save
+   * message, so opening a damaged file cannot overwrite it. The only action
+   * offered is opening the raw file so the user can repair or recover it.
+   */
+  private getUnreadableContent(webview: vscode.Webview, document: vscode.TextDocument): string {
+    const nonce = this.getNonce();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
+    <title>Arc Notebook</title>
+    <style>
+        body {
+            font-family: var(--vscode-font-family);
+            color: var(--vscode-foreground);
+            background-color: var(--vscode-editor-background);
+            padding: 30px;
+            max-width: 760px;
+            margin: 0 auto;
+        }
+        h2 { margin-top: 0; }
+        .notice {
+            border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-panel-border));
+            background-color: var(--vscode-inputValidation-errorBackground, transparent);
+            border-radius: 5px;
+            padding: 16px 20px;
+        }
+        p { line-height: 1.5; }
+        code {
+            font-family: var(--vscode-editor-font-family);
+            background-color: var(--vscode-textCodeBlock-background);
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        button {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 2px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-family: var(--vscode-font-family);
+            margin-top: 6px;
+        }
+        button:hover { background-color: var(--vscode-button-hoverBackground); }
+        .path {
+            color: var(--vscode-descriptionForeground);
+            font-size: 0.9em;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <div class="notice">
+        <h2>This notebook could not be opened</h2>
+        <p>
+            <code>${escapeHtml(document.uri.path.split('/').pop() || 'notebook')}</code>
+            is not empty, but its contents are not a valid Arc notebook — the
+            file may be truncated, partially written, or in another format.
+        </p>
+        <p>
+            It has <strong>not</strong> been modified. Editing is disabled here
+            so that nothing overwrites whatever is still in the file.
+        </p>
+        <p>Open the raw file to inspect or repair it:</p>
+        <button id="open-raw">Open File in Text Editor</button>
+        <p class="path">${escapeHtml(document.uri.fsPath)}</p>
+    </div>
+    <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi();
+        document.getElementById('open-raw').addEventListener('click', () => {
+            vscode.postMessage({ command: 'openRaw' });
+        });
+    </script>
+</body>
+</html>`;
+  }
+
   private getNonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let nonce = '';
@@ -268,14 +366,51 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     return nonce;
   }
 
-  private getHtmlContent(webview: vscode.Webview, document: vscode.TextDocument): string {
-    let notebook: ArcNotebook;
+  /**
+   * Interpret a document's text as a notebook.
+   *
+   * Distinguishes three cases that must NOT be conflated:
+   *  - empty document: a legitimately new notebook, safe to start editing;
+   *  - valid notebook: use it;
+   *  - non-empty but unusable (bad JSON, or JSON that is not a notebook):
+   *    return undefined so the caller can refuse to render an editable view.
+   *
+   * Previously anything unparseable silently became `{cells: []}`, and the
+   * autosave then wrote that empty notebook back over the user's file. A
+   * truncated or half-synced file was destroyed simply by being opened and
+   * typed in. Separately, JSON that parsed but was not a notebook (an array,
+   * a bare string) threw on `.cells.map` and broke rendering entirely.
+   */
+  private parseNotebook(text: string): ArcNotebook | undefined {
+    if (text.trim() === '') {
+      return { version: '1.0', cells: [] };
+    }
 
+    let parsed: unknown;
     try {
-      const text = document.getText();
-      notebook = text ? JSON.parse(text) : { version: '1.0', cells: [] };
+      parsed = JSON.parse(text);
     } catch {
-      notebook = { version: '1.0', cells: [] };
+      return undefined;
+    }
+
+    // Shape check: `cells` must exist and be an array before anything maps it.
+    if (
+      typeof parsed !== 'object' || parsed === null ||
+      !Array.isArray((parsed as ArcNotebook).cells)
+    ) {
+      return undefined;
+    }
+
+    return parsed as ArcNotebook;
+  }
+
+  private getHtmlContent(webview: vscode.Webview, document: vscode.TextDocument): string {
+    const notebook = this.parseNotebook(document.getText());
+
+    if (!notebook) {
+      // Render a read-only explanation instead of an empty, editable notebook.
+      // Nothing here can autosave, so the file on disk stays intact.
+      return this.getUnreadableContent(webview, document);
     }
 
     const cellsHtml = notebook.cells.map((cell, i) => this.renderCell(cell, i)).join('');
