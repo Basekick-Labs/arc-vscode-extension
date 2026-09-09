@@ -36,11 +36,40 @@ export interface ArcDatabase {
   measurements?: ArcMeasurement[];
 }
 
+/**
+ * License block from Arc's /health.
+ *
+ * Absent entirely on builds where the license client is not wired, so treat a
+ * missing block as OSS/unknown rather than an error. Arc deliberately excludes
+ * the license key, customer identity and feature list here because /health is
+ * unauthenticated -- so this gives the tier, not per-feature capability.
+ */
+export interface ArcLicenseHealth {
+  /** 'oss' when unlicensed; otherwise starter | professional | enterprise | unlimited */
+  tier?: string;
+  /** 'unlicensed' | 'expired' | ... */
+  status?: string;
+  source?: string;
+  expires_at?: string;
+  days_remaining?: number;
+  site_license?: boolean;
+}
+
+/**
+ * Response from Arc's /health.
+ *
+ * Field names and types mirror what the server actually sends. Note `uptime` is
+ * a formatted string ("173h40m58s"), not a number -- it was previously typed as
+ * a number here, so any arithmetic on it was already wrong. `uptime_sec`
+ * carries the numeric value.
+ */
 export interface ArcHealthStatus {
   status: string;
-  version?: string;
-  uptime?: number;
-  timestamp?: string;
+  time?: string;
+  uptime?: string;
+  uptime_sec?: number;
+  storage?: Record<string, any>;
+  license?: ArcLicenseHealth;
 }
 
 export interface ArcMetrics {

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ArcConnection } from '../types';
+import { ArcConnection, ArcHealthStatus } from '../types';
 import { ArcClient } from '../api/arcClient';
 
 export class ConnectionManager {
@@ -7,6 +7,7 @@ export class ConnectionManager {
   private activeConnection?: ArcConnection;
   private activeClient?: ArcClient;
   private activeDatabase?: string;
+  private activeHealth?: ArcHealthStatus;
   private connections: Map<string, ArcConnection> = new Map();
   private secrets: vscode.SecretStorage;
   private context: vscode.ExtensionContext;
@@ -102,14 +103,62 @@ export class ConnectionManager {
     this.activeDatabase = connection.database;
 
     const token = await this.getToken(connectionId);
+
+    // A bearer token over plain http crosses the network in cleartext. Local
+    // connections are the normal development case and not worth nagging about,
+    // so warn only when the token actually leaves the machine.
+    if (token && connection.protocol === 'http' && !ConnectionManager.isLoopback(connection.host)) {
+      vscode.window.showWarningMessage(
+        `Connection "${connection.name}" sends its token unencrypted over http to ${connection.host}. Use https if the server supports it.`
+      );
+    }
+
     const config = vscode.workspace.getConfiguration('arc');
     const timeout = config.get<number>('queryTimeout', 30000);
     this.activeClient = new ArcClient(connection, token, timeout);
 
-    // Verify connection works
-    await this.activeClient.healthCheck();
+    // Verify connection works. The response also carries the server's edition,
+    // so keep it rather than discarding it -- this is the only place the
+    // extension learns the tier, and it costs no extra request.
+    this.activeHealth = await this.activeClient.healthCheck();
 
     return this.activeClient;
+  }
+
+  /**
+   * True for hosts that never leave the machine, where plain http is fine.
+   * Covers IPv6 loopback and ::ffff:127.0.0.1-style mapped addresses.
+   */
+  private static isLoopback(host: string): boolean {
+    const h = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+    return (
+      h === 'localhost' ||
+      h === '::1' ||
+      h.endsWith('.localhost') ||
+      /^127\./.test(h) ||
+      /^::ffff:127\./.test(h)
+    );
+  }
+
+  /**
+   * Health payload from the last successful connect, if any.
+   */
+  getActiveHealth(): ArcHealthStatus | undefined {
+    return this.activeHealth;
+  }
+
+  /**
+   * Short edition label for display, e.g. "OSS" or "Enterprise".
+   *
+   * Returns undefined when the server sent no license block at all, which is
+   * the case for builds without the license client wired -- unknown, not OSS.
+   */
+  getEditionLabel(): string | undefined {
+    const tier = this.activeHealth?.license?.tier;
+    if (!tier) {
+      return undefined;
+    }
+    return tier === 'oss' ? 'OSS' : tier.charAt(0).toUpperCase() + tier.slice(1);
   }
 
   /**
@@ -147,6 +196,7 @@ export class ConnectionManager {
     this.activeConnection = undefined;
     this.activeClient = undefined;
     this.activeDatabase = undefined;
+    this.activeHealth = undefined;
   }
 
   /**

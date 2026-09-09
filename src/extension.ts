@@ -75,8 +75,25 @@ export function activate(context: vscode.ExtensionContext) {
     if (connectionManager.isConnected()) {
       const connection = connectionManager.getActiveConnection();
       const activeDb = connectionManager.getActiveDatabase();
+      const edition = connectionManager.getEditionLabel();
+      const license = connectionManager.getActiveHealth()?.license;
+
       statusBarItem.text = `$(database) Arc: ${connection?.name}${activeDb ? ` [${activeDb}]` : ''}`;
-      statusBarItem.tooltip = `Connected to ${connection?.protocol}://${connection?.host}:${connection?.port}${activeDb ? `\nDatabase: ${activeDb}` : ''}`;
+
+      const lines = [
+        `Connected to ${connection?.protocol}://${connection?.host}:${connection?.port}`
+      ];
+      if (activeDb) { lines.push(`Database: ${activeDb}`); }
+      // Omitted entirely when the server sends no license block -- saying
+      // nothing is better than guessing an edition.
+      if (edition) { lines.push(`Edition: ${edition}`); }
+      if (license?.status === 'expired') {
+        lines.push('License expired - enterprise features stop at next restart');
+      } else if (typeof license?.days_remaining === 'number' && license.days_remaining <= 30) {
+        lines.push(`License expires in ${license.days_remaining} day${license.days_remaining === 1 ? '' : 's'}`);
+      }
+      statusBarItem.tooltip = lines.join('\n');
+
       statusBarItem.backgroundColor = undefined;
     } else {
       statusBarItem.text = '$(debug-disconnect) Arc: Not Connected';

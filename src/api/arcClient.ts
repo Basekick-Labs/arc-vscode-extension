@@ -10,6 +10,7 @@ import {
   QueryRequest,
   MeasurementInfo
 } from '../types';
+import { filterValidNames } from '../utils/sqlUtils.js';
 
 export class ArcClient {
   private client: AxiosInstance;
@@ -219,11 +220,11 @@ export class ArcClient {
           c.toLowerCase() === 'table_name' || c.toLowerCase() === 'name'
         );
         if (nameIdx >= 0) {
-          return rows.map((row: any[]) => ({ name: row[nameIdx] }));
+          return filterValidNames(rows.map((row: any[]) => row[nameIdx])).map(name => ({ name }));
         }
         // Fallback: if multiple columns, table name is typically index 1; if single column, index 0
         const idx = rows[0].length > 1 ? 1 : 0;
-        return rows.map((row: any[]) => ({ name: row[idx] }));
+        return filterValidNames(rows.map((row: any[]) => row[idx])).map(name => ({ name }));
       }
 
       return [];
@@ -262,7 +263,7 @@ export class ArcClient {
       // Response format: { columns: ['database'], data: [['default'], ['production'], ...] }
       const rows = responseData.data || responseData.rows || [];
       if (Array.isArray(rows)) {
-        return rows.map((row: any[]) => row[0]).filter((db: any) => db);
+        return filterValidNames(rows.map((row: any[]) => row[0]));
       }
 
       return ['default'];
@@ -356,7 +357,13 @@ export class ArcClient {
       } else if (axiosError.response?.status === 401) {
         message = 'Authentication failed - Invalid or missing token';
       } else if (axiosError.response?.status === 403) {
-        message = 'Access forbidden - Check token permissions';
+        // Arc returns 403 with an explanatory message for licence-gated
+        // features too, e.g. "RBAC requires an enterprise license...". The old
+        // flat message told users to check token permissions, which is
+        // actively misleading when the real problem is licensing -- so prefer
+        // whatever the server said.
+        const serverMessage = responseData?.error || responseData?.message;
+        message = serverMessage || 'Access forbidden - Check token permissions';
       } else if (axiosError.response?.status === 404) {
         message = 'Endpoint not found - Check server URL';
       }
