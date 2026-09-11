@@ -286,13 +286,17 @@ export class ArcClient {
       // For now, use line protocol format as it's simpler
       // Full msgpack implementation would require @msgpack/msgpack library
       const lines = data.map(point => {
-        const tags = point.tags ? Object.entries(point.tags)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(',') : '';
+        const escapeKey = (s: string) => s.replace(/([\s,=])/g, '\\$1');
+            const escapeValue = (s: string) => s.replace(/([\s,=])/g, '\\$1');
+            const escapeField = (s: string) => s.replace(/\/g, '\\\\').replace(/"/g, '\"');
 
-        const fields = Object.entries(point.fields)
-          .map(([k, v]) => `${k}=${typeof v === 'string' ? `"${v}"` : v}`)
-          .join(',');
+            const tags = point.tags ? Object.entries(point.tags)
+              .map(([k, v]) => `${escapeKey(k)}=${escapeValue(v)}`)
+              .join(',') : '';
+
+            const fields = Object.entries(point.fields)
+              .map(([k, v]) => `${escapeKey(k)}=${typeof v === 'string' ? `"${escapeField(v)}"` : v}`)
+              .join(',');
 
         const timestamp = point.timestamp || Date.now() * 1000000; // nanoseconds
 
