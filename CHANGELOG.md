@@ -2,6 +2,11 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Installation telemetry disclosure**: Documented the anonymous daily install beacon, the data it contains, and the `arc.telemetry.enabled` and VS Code global telemetry opt-out controls.
+
 ## [0.3.6] - 2026-04-09
 
 ### Fixed
