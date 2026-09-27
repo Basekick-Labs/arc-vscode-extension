@@ -42,6 +42,9 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
    */
   private readonly verdicts = new Map<string, { version: number; structural: boolean | null }>();
 
+  /** Panels currently rendering each notebook document. */
+  private readonly panels = new Map<string, Set<vscode.WebviewPanel>>();
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly connectionManager: ConnectionManager
@@ -58,12 +61,21 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     };
 
     let disposed = false;
+    const documentKey = document.uri.toString();
+    const documentPanels = this.panels.get(documentKey) ?? new Set<vscode.WebviewPanel>();
+    documentPanels.add(webviewPanel);
+    this.panels.set(documentKey, documentPanels);
 
     // Handle messages from the webview
     const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async message => {
       switch (message.command) {
         case 'save':
-          await this.saveNotebook(document, message.notebook, message.structural === true);
+          await this.saveNotebook(
+            document,
+            message.notebook,
+            message.structural === true,
+            webviewPanel
+          );
           break;
         case 'executeCell':
           if (disposed) { return; }
@@ -96,10 +108,6 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
       // edits. Everything else -- our own structural save (add/delete cell) and
       // any external edit -- still rebuilds.
       //
-      // Known limitation: with two panels on one document, a non-structural
-      // save in one no longer refreshes the other until a structural change.
-      // Tracked separately; the previous behaviour (constantly destroying both)
-      // was worse.
       if (structural === false) { return; }
 
       updateWebview();
@@ -109,6 +117,10 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
       disposed = true;
       changeDocumentSubscription.dispose();
       messageSubscription.dispose();
+      documentPanels.delete(webviewPanel);
+      if (documentPanels.size === 0) {
+        this.panels.delete(documentKey);
+      }
       // pendingWrites is intentionally left alone: another panel may still be
       // open on this document. It drains via change events and the length cap.
     });
@@ -164,7 +176,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
   private async saveNotebook(
     document: vscode.TextDocument,
     notebook: ArcNotebook,
-    structural: boolean
+    structural: boolean,
+    sourcePanel: vscode.WebviewPanel
   ): Promise<void> {
     // Never write over a file we could not read. getHtmlContent already
     // refuses to render an editable view in that case, so no save should
@@ -208,6 +221,18 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         const i = q.indexOf(entry);
         if (i !== -1) { q.splice(i, 1); }
         if (q.length === 0) { this.pendingWrites.delete(key); }
+      }
+      return;
+    }
+
+    if (!structural) {
+      for (const panel of this.panels.get(key) ?? []) {
+        if (panel !== sourcePanel) {
+          panel.webview.postMessage({
+            command: 'syncNotebook',
+            notebook
+          });
+        }
       }
     }
   }
@@ -858,10 +883,33 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             saveNotebook(true);
         }
 
+        function syncNotebook(nextNotebook) {
+            if (nextNotebook.cells.length !== notebook.cells.length ||
+                nextNotebook.cells.some((cell, index) => cell.type !== notebook.cells[index].type)) {
+                return;
+            }
+
+            notebook = nextNotebook;
+            lastSavedJson = JSON.stringify(notebook);
+            notebook.cells.forEach((cell, index) => {
+                const textarea = document.querySelector(
+                    \`#cell-\${index} textarea[data-cell-index]\`
+                );
+                if (textarea && textarea.value !== cell.content) {
+                    textarea.value = cell.content;
+                }
+                renderCellOutput(index);
+            });
+            renderVariables();
+        }
+
         // Listen for messages from extension
         window.addEventListener('message', event => {
             const message = event.data;
             switch (message.command) {
+                case 'syncNotebook':
+                    syncNotebook(message.notebook);
+                    break;
                 case 'cellResult':
                     updateCellOutput(message.index, message.output, message.error);
                     break;
