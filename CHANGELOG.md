@@ -2,6 +2,18 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **A refused database listing no longer looks like an empty server.** Arc restricts a token's reads per database, and refuses to list every database for a scoped token rather than returning a partial list — the same bar `SHOW DATABASES` applies. `getDatabases()` answered *any* request failure by returning `['default']`, so a refusal put a database in the explorer that the token might not be able to read, with nothing anywhere saying the token had been refused. Refusals now surface: the explorer shows the connection's own database when one is set, and otherwise one node saying the token is scoped and that a database has to be set. The lenient `['default']` fallback stays for an unreachable server, which is a different problem.
+- **Arc's 401 and 403 are no longer one message.** 403 alone is Arc's answer to four different things — a token with no read permission, a token whose grants do not cover the database asked for, a licence-gated feature, and Arc's own permission store being unreadable — distinguishable only by message. Each now produces a sentence naming the fix, so a scoped token is never reported as a bad token and a server fault is never reported as a permissions problem.
+- **A refusal is no longer retried against a second endpoint.** `getMeasurements()` fell back from `SHOW TABLES` to `/api/v1/measurements` on any failure; that endpoint applies the same per-database check and answers identically, so the retry only doubled the requests and the audit entries for a decision Arc had already made. The fallback still runs for other failures.
+- **SQL completions survive a scoped token.** The completion cache was emptied whenever `SHOW DATABASES` failed, costing a scoped token every completion it could still have had; it now seeds from the connection's database instead.
+
+### Added
+- **Token permissions are chosen, not assumed.** Creating a token asks which of `read`, `write`, `delete` and `admin` it should carry, defaulting to Arc's own `read,write`. The created-token message lists them and notes that RBAC grants narrow them further if the token belongs to a team. Previously every token the extension created silently took the server default, and there was no way to ask for a browse-only one.
+- **First unit tests** (`npm test`, `node --test` over the compiled output): Arc's refusal classifier and the HTTP client's handling of 200/401/403/404 on the database and measurement listings.
+
 ## [0.3.6] - 2026-04-09
 
 ### Fixed

@@ -11,6 +11,12 @@ import {
   MeasurementInfo
 } from '../types';
 import { filterValidNames } from '../utils/sqlUtils.js';
+import {
+  ArcAccessError,
+  arcErrorMessage,
+  classifyArcError,
+  isScopedRefusal
+} from '../utils/arcErrors.js';
 
 export class ArcClient {
   private client: AxiosInstance;
@@ -229,7 +235,17 @@ export class ArcClient {
 
       return [];
     } catch (error) {
-      // Fallback to /measurements endpoint if query fails
+      // A refusal is Arc's decision, not a reason to try another route to the
+      // same data: `/api/v1/measurements` applies the same per-database check
+      // and answers identically, so the fallback would only double the
+      // requests and the audit entries. Surface it.
+      const refusal = this.asAccessError(error);
+      if (refusal) {
+        throw refusal;
+      }
+
+      // Fallback to /measurements endpoint if the query failed for any other
+      // reason (an older server, a transport error).
       try {
         const params = database ? { database } : {};
         const response = await this.client.get('/api/v1/measurements', { params });
@@ -241,11 +257,40 @@ export class ArcClient {
           return data.measurements.map((name: string) => ({ name }));
         }
       } catch (endpointError) {
+        const fallbackRefusal = this.asAccessError(endpointError);
+        if (fallbackRefusal) {
+          throw fallbackRefusal;
+        }
         console.warn('Both SHOW TABLES and /measurements failed:', endpointError);
       }
 
       throw this.handleError(error);
     }
+  }
+
+  /**
+   * Returns an ArcAccessError when the error is Arc refusing the request —
+   * 401, or one of the three different things it answers 403 with — and
+   * undefined for anything else.
+   *
+   * Arc's 403s are told apart by message, not by status, so this is the one
+   * place that reads them (see utils/arcErrors.ts). It exists separately from
+   * handleError because callers need to branch on WHICH refusal it was, not
+   * just print it: a scoped token can still work once a database is named,
+   * while a token with no read permission cannot.
+   */
+  private asAccessError(error: unknown): ArcAccessError | undefined {
+    if (isScopedRefusal(error) || error instanceof ArcAccessError) {
+      return error;
+    }
+    if (!axios.isAxiosError(error)) {
+      return undefined;
+    }
+    const status = error.response?.status;
+    if (status !== 401 && status !== 403) {
+      return undefined;
+    }
+    return new ArcAccessError(classifyArcError(status, serverErrorMessage(error.response?.data)));
   }
 
   /**
@@ -268,7 +313,19 @@ export class ArcClient {
 
       return ['default'];
     } catch (error) {
-      // If query fails, fallback to default database
+      // A refusal is not a connectivity problem and must not be answered with
+      // a made-up database. Arc restricts reads per database, so a scoped
+      // token is refused here rather than given a filtered list — and the old
+      // blanket `return ['default']` turned that into a tree entry for a
+      // database the token may not be able to read at all, with nothing
+      // anywhere saying the token was scoped. Let the caller see the refusal
+      // and degrade knowingly.
+      const refusal = this.asAccessError(error);
+      if (refusal) {
+        throw refusal;
+      }
+      // Anything else (an unreachable server, a malformed response) keeps the
+      // old lenient behaviour: one database so the UI still has a root.
       if (axios.isAxiosError(error)) {
         console.warn('Failed to get databases, using default:', error.message);
         return ['default'];
@@ -354,16 +411,21 @@ export class ArcClient {
         message = `Cannot resolve hostname: ${this.connection.host}`;
       } else if (axiosError.code === 'ETIMEDOUT') {
         message = `Connection timeout to ${this.connection.host}:${this.connection.port}`;
-      } else if (axiosError.response?.status === 401) {
-        message = 'Authentication failed - Invalid or missing token';
-      } else if (axiosError.response?.status === 403) {
-        // Arc returns 403 with an explanatory message for licence-gated
-        // features too, e.g. "RBAC requires an enterprise license...". The old
-        // flat message told users to check token permissions, which is
-        // actively misleading when the real problem is licensing -- so prefer
-        // whatever the server said.
-        const serverMessage = responseData?.error || responseData?.message;
-        message = serverMessage || 'Access forbidden - Check token permissions';
+      } else if (axiosError.response?.status === 401 || axiosError.response?.status === 403) {
+        // 401 and 403 are not one condition, and 403 is not even one
+        // condition by itself: Arc answers it for a token with no read
+        // permission, for a token whose grants do not cover the database
+        // asked for, for a licence-gated feature, and for its own permission
+        // store being unreadable — distinguishable only by message. The
+        // classifier reads them (utils/arcErrors.ts) and returns a sentence
+        // naming the fix, so no caller has to pattern-match here and a
+        // scoped token is never reported as a bad token.
+        message = arcErrorMessage(
+          classifyArcError(
+            axiosError.response.status,
+            serverErrorMessage(responseData)
+          )
+        );
       } else if (axiosError.response?.status === 404) {
         message = 'Endpoint not found - Check server URL';
       }
@@ -390,4 +452,23 @@ export class ArcClient {
 
     return new Error('Unknown error occurred');
   }
+}
+
+/**
+ * Arc's own message from an error body. It uses `error` on most routes and
+ * `message` on a few, so both are read; a non-object body (an HTML error page
+ * from a proxy, say) yields undefined rather than a misleading string.
+ */
+function serverErrorMessage(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) {
+    return undefined;
+  }
+  const body = data as { error?: unknown; message?: unknown };
+  if (typeof body.error === 'string' && body.error !== '') {
+    return body.error;
+  }
+  if (typeof body.message === 'string' && body.message !== '') {
+    return body.message;
+  }
+  return undefined;
 }

@@ -80,22 +80,30 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
     const client = this.connectionManager.getActiveClient();
     if (!client) { return; }
 
-    // Fetch databases
+    // Fetch databases.
+    //
+    // Arc refuses SHOW DATABASES for a token scoped to particular databases
+    // rather than returning a filtered list, so emptying the cache on any
+    // failure costs such a token every completion it could still have had.
+    // Fall back to the connection's own database: it is the one the user
+    // already named, and the only one we know the token is meant to use.
+    const databaseName = (name: string): vscode.CompletionItem => {
+      const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Module);
+      item.detail = 'Database';
+      item.insertText = name;
+      return item;
+    };
+
     try {
       const result = await client.executeQuery({
         query: 'SHOW DATABASES',
         format: 'json'
       });
 
-      this.databaseCache = result.rows.map((row: any) => {
-        const dbName = row[0];
-        const item = new vscode.CompletionItem(dbName, vscode.CompletionItemKind.Module);
-        item.detail = 'Database';
-        item.insertText = dbName;
-        return item;
-      });
+      this.databaseCache = result.rows.map((row: any) => databaseName(row[0]));
     } catch {
-      this.databaseCache = [];
+      const active = this.connectionManager.getActiveDatabase();
+      this.databaseCache = active ? [databaseName(active)] : [];
     }
 
     // Fetch tables from all databases
