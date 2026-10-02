@@ -6,7 +6,7 @@ import { ArcTokensProvider } from '../providers/arcTokensProvider';
 import { ArcQueriesProvider } from '../providers/arcQueriesProvider';
 import { QueryResultsView } from '../views/queryResultsView';
 import { QueryStorage } from '../utils/queryStorage';
-import { ArcConnection } from '../types';
+import { ArcConnection, ArcTokenPermission } from '../types';
 import { ArcClient } from '../api/arcClient';
 import { CSVImporter } from '../utils/csvImporter';
 import { DataGenerator } from '../utils/dataGenerator';
@@ -374,6 +374,69 @@ export class ArcCommands {
   /**
    * Create a new authentication token
    */
+
+  /**
+   * Ask which coarse permissions a new token should carry.
+   *
+   * Arc defaults to `read,write` when a create request omits them, which the
+   * extension used to take silently. That default is worth surfacing now that
+   * Arc enforces read restrictions: `read` is what the extension needs to
+   * browse databases and run queries at all, so a token created without it
+   * cannot be used here — and an operator who wants a browse-only token had
+   * no way to ask for one.
+   *
+   * Returns undefined if the user cancelled, so the caller can abort rather
+   * than create a token nobody asked for.
+   */
+  private async pickTokenPermissions(): Promise<ArcTokenPermission[] | undefined> {
+    const choices: Array<vscode.QuickPickItem & { value: ArcTokenPermission }> = [
+      { label: 'read', description: 'Query data and browse databases — required by this extension', value: 'read', picked: true },
+      { label: 'write', description: 'Ingest data', value: 'write', picked: true },
+      { label: 'delete', description: 'Delete data and databases', value: 'delete' },
+      { label: 'admin', description: 'Everything, including tokens and RBAC. Also bypasses per-database read restrictions', value: 'admin' }
+    ];
+
+    const picked = await vscode.window.showQuickPick(choices, {
+      canPickMany: true,
+      title: 'Token permissions',
+      placeHolder: 'read and write are Arc\'s default; read is required for this extension'
+    });
+
+    if (!picked) {
+      return undefined;
+    }
+    if (picked.length === 0) {
+      // Arc reads an empty array as "no coarse permissions" (an RBAC-only
+      // token). Sending that by accident, from someone clearing the list to
+      // mean "defaults", would create a token that cannot read anything until
+      // grants exist — so treat it as a cancellation and say why.
+      vscode.window.showWarningMessage(
+        'No permissions selected, so no token was created. A token needs at least "read" to be usable from this extension.'
+      );
+      return undefined;
+    }
+    if (!picked.some(p => p.value === 'read' || p.value === 'admin')) {
+      vscode.window.showWarningMessage(
+        'This token has no read permission, so it cannot query or browse databases from this extension.'
+      );
+    }
+    return picked.map(p => p.value);
+  }
+
+  /**
+   * What a freshly created token can do, for the message that shows it. Arc
+   * restricts reads per database for a token that belongs to a team, so the
+   * permission list is a ceiling, not a guarantee — say that rather than
+   * implying the token can read everything.
+   */
+  private describeTokenPermissions(permissions: ArcTokenPermission[]): string {
+    const list = permissions.join(', ');
+    if (permissions.includes('admin')) {
+      return `Permissions: ${list}.`;
+    }
+    return `Permissions: ${list}. If the token is added to an RBAC team on the server, its grants narrow this further — it will only see the databases it is granted.`;
+  }
+
   async createToken(): Promise<void> {
     try {
       const client = this.requireConnectedClient();
@@ -393,7 +456,12 @@ export class ArcCommands {
         placeHolder: 'VS Code Extension Token'
       });
 
-      const response = await client.createToken({ name, description });
+      const permissions = await this.pickTokenPermissions();
+      if (!permissions) {
+        return;
+      }
+
+      const response = await client.createToken({ name, description, permissions });
 
       // Save token
       const activeConnection = this.connectionManager.getActiveConnection();
@@ -403,7 +471,7 @@ export class ArcCommands {
 
       // Show token to user (one time only)
       const action = await vscode.window.showInformationMessage(
-        'Token created successfully. Copy it now - it won\'t be shown again.',
+        `Token created successfully. Copy it now - it won't be shown again. ${this.describeTokenPermissions(permissions)}`,
         'Copy Token'
       );
 
@@ -706,11 +774,16 @@ export class ArcCommands {
         placeHolder: 'Token for API access'
       });
 
-      const response = await client.createToken({ name, description });
+      const permissions = await this.pickTokenPermissions();
+      if (!permissions) {
+        return;
+      }
+
+      const response = await client.createToken({ name, description, permissions });
 
       // Show token to user (one time only)
       const action = await vscode.window.showInformationMessage(
-        `Token "${name}" created successfully. Copy it now - it won\'t be shown again.`,
+        `Token "${name}" created successfully. Copy it now - it won't be shown again. ${this.describeTokenPermissions(permissions)}`,
         'Copy Token'
       );
 

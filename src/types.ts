@@ -83,7 +83,21 @@ export interface ArcMetrics {
 export interface TokenCreateRequest {
   name: string;
   description?: string;
+  /**
+   * Coarse permissions for the new token. Omit to take Arc's default,
+   * `read,write`.
+   *
+   * Arc also accepts an empty array, which creates a token with no coarse
+   * permissions at all — the documented way to ask for a token governed
+   * purely by its RBAC grants. The extension does not offer that: a token
+   * with no grants yet cannot read anything, so it would arrive unable to
+   * browse the server it was just created on.
+   */
+  permissions?: ArcTokenPermission[];
 }
+
+/** The coarse permissions Arc recognises on a token. */
+export type ArcTokenPermission = 'read' | 'write' | 'delete' | 'admin';
 
 export interface TokenCreateResponse {
   token: string;
