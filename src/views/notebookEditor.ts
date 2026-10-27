@@ -699,6 +699,40 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             });
         }
 
+        function renderVariablesPreservingState() {
+            const container = document.getElementById('variables-list');
+            const rows = Array.from(container.querySelectorAll('.variable-row'));
+            const activeInput = document.activeElement instanceof HTMLInputElement &&
+                container.contains(document.activeElement)
+                ? document.activeElement
+                : null;
+            const activeRow = activeInput && activeInput.closest('.variable-row');
+            const activeRowIndex = activeRow ? rows.indexOf(activeRow) : -1;
+            const activeInputName = activeInput?.name;
+            const selectionStart = activeInput?.selectionStart;
+            const selectionEnd = activeInput?.selectionEnd;
+            const selectionDirection = activeInput?.selectionDirection;
+            const scrollTop = container.scrollTop;
+            const scrollLeft = container.scrollLeft;
+
+            renderVariables();
+            container.scrollTop = scrollTop;
+            container.scrollLeft = scrollLeft;
+
+            if (activeRowIndex >= 0 && activeInputName && selectionStart !== null && selectionEnd !== null) {
+                const replacementRow = container.querySelectorAll('.variable-row')[activeRowIndex];
+                const replacementInput = replacementRow?.querySelector('input[name="' + activeInputName + '"]');
+                if (replacementInput) {
+                    replacementInput.focus();
+                    replacementInput.setSelectionRange(
+                        Math.min(selectionStart, replacementInput.value.length),
+                        Math.min(selectionEnd, replacementInput.value.length),
+                        selectionDirection
+                    );
+                }
+            }
+        }
+
         function addVariable() {
             addVariableRow('', '');
         }
@@ -889,18 +923,39 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 return;
             }
 
+            const previousNotebook = notebook;
+            const variablesChanged = JSON.stringify(previousNotebook.globalVariables || {}) !==
+                JSON.stringify(nextNotebook.globalVariables || {});
+
             notebook = nextNotebook;
             lastSavedJson = JSON.stringify(notebook);
             notebook.cells.forEach((cell, index) => {
+                const previousCell = previousNotebook.cells[index];
                 const textarea = document.querySelector(
                     \`#cell-\${index} textarea[data-cell-index]\`
                 );
                 if (textarea && textarea.value !== cell.content) {
+                    const selectionStart = textarea.selectionStart;
+                    const selectionEnd = textarea.selectionEnd;
+                    const selectionDirection = textarea.selectionDirection;
+                    const scrollTop = textarea.scrollTop;
+                    const scrollLeft = textarea.scrollLeft;
                     textarea.value = cell.content;
+                    textarea.setSelectionRange(
+                        Math.min(selectionStart, textarea.value.length),
+                        Math.min(selectionEnd, textarea.value.length),
+                        selectionDirection
+                    );
+                    textarea.scrollTop = scrollTop;
+                    textarea.scrollLeft = scrollLeft;
                 }
-                renderCellOutput(index);
+                if (JSON.stringify(previousCell.output) !== JSON.stringify(cell.output)) {
+                    renderCellOutput(index);
+                }
             });
-            renderVariables();
+            if (variablesChanged) {
+                renderVariablesPreservingState();
+            }
         }
 
         // Listen for messages from extension
