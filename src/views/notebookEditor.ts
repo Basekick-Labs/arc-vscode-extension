@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../utils/connectionManager';
 import { ArcNotebook, ArcNotebookCell } from '../types/notebook';
 import { escapeHtml } from '../utils/sqlUtils';
+import { mergeSyncedNotebook } from './notebookSync';
 
 export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvider {
   public static register(context: vscode.ExtensionContext, connectionManager: ConnectionManager): vscode.Disposable {
@@ -440,6 +441,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     const cellsHtml = notebook.cells.map((cell, i) => this.renderCell(cell, i)).join('');
     const nonce = this.getNonce();
+    const mergeSyncedNotebookSource = mergeSyncedNotebook.toString();
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -649,6 +651,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        const mergeSyncedNotebook = ${mergeSyncedNotebookSource};
         let notebook = ${JSON.stringify(notebook)};
 
         // Initialize global variables if not present
@@ -924,11 +927,14 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             }
 
             const previousNotebook = notebook;
+            const savedNotebook = JSON.parse(lastSavedJson);
             const variablesChanged = JSON.stringify(previousNotebook.globalVariables || {}) !==
                 JSON.stringify(nextNotebook.globalVariables || {});
 
-            notebook = nextNotebook;
-            lastSavedJson = JSON.stringify(notebook);
+            notebook = mergeSyncedNotebook(savedNotebook, previousNotebook, nextNotebook);
+            // The incoming snapshot is persisted. Any local-only edits remain
+            // dirty and will be written by this panel's pending autosave.
+            lastSavedJson = JSON.stringify(nextNotebook);
             notebook.cells.forEach((cell, index) => {
                 const previousCell = previousNotebook.cells[index];
                 const textarea = document.querySelector(
