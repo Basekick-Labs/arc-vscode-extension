@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../utils/connectionManager';
 import { ArcNotebook, ArcNotebookCell } from '../types/notebook';
 import { escapeHtml } from '../utils/sqlUtils';
+import { mergeSyncedNotebook } from './notebookSync';
 
 export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvider {
   public static register(context: vscode.ExtensionContext, connectionManager: ConnectionManager): vscode.Disposable {
@@ -42,6 +43,9 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
    */
   private readonly verdicts = new Map<string, { version: number; structural: boolean | null }>();
 
+  /** Panels currently rendering each notebook document. */
+  private readonly panels = new Map<string, Set<vscode.WebviewPanel>>();
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly connectionManager: ConnectionManager
@@ -58,12 +62,21 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     };
 
     let disposed = false;
+    const documentKey = document.uri.toString();
+    const documentPanels = this.panels.get(documentKey) ?? new Set<vscode.WebviewPanel>();
+    documentPanels.add(webviewPanel);
+    this.panels.set(documentKey, documentPanels);
 
     // Handle messages from the webview
     const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async message => {
       switch (message.command) {
         case 'save':
-          await this.saveNotebook(document, message.notebook, message.structural === true);
+          await this.saveNotebook(
+            document,
+            message.notebook,
+            message.structural === true,
+            webviewPanel
+          );
           break;
         case 'executeCell':
           if (disposed) { return; }
@@ -96,10 +109,6 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
       // edits. Everything else -- our own structural save (add/delete cell) and
       // any external edit -- still rebuilds.
       //
-      // Known limitation: with two panels on one document, a non-structural
-      // save in one no longer refreshes the other until a structural change.
-      // Tracked separately; the previous behaviour (constantly destroying both)
-      // was worse.
       if (structural === false) { return; }
 
       updateWebview();
@@ -109,6 +118,10 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
       disposed = true;
       changeDocumentSubscription.dispose();
       messageSubscription.dispose();
+      documentPanels.delete(webviewPanel);
+      if (documentPanels.size === 0) {
+        this.panels.delete(documentKey);
+      }
       // pendingWrites is intentionally left alone: another panel may still be
       // open on this document. It drains via change events and the length cap.
     });
@@ -164,7 +177,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
   private async saveNotebook(
     document: vscode.TextDocument,
     notebook: ArcNotebook,
-    structural: boolean
+    structural: boolean,
+    sourcePanel: vscode.WebviewPanel
   ): Promise<void> {
     // Never write over a file we could not read. getHtmlContent already
     // refuses to render an editable view in that case, so no save should
@@ -208,6 +222,18 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         const i = q.indexOf(entry);
         if (i !== -1) { q.splice(i, 1); }
         if (q.length === 0) { this.pendingWrites.delete(key); }
+      }
+      return;
+    }
+
+    if (!structural) {
+      for (const panel of this.panels.get(key) ?? []) {
+        if (panel !== sourcePanel) {
+          panel.webview.postMessage({
+            command: 'syncNotebook',
+            notebook
+          });
+        }
       }
     }
   }
@@ -415,6 +441,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     const cellsHtml = notebook.cells.map((cell, i) => this.renderCell(cell, i)).join('');
     const nonce = this.getNonce();
+    const mergeSyncedNotebookSource = mergeSyncedNotebook.toString();
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -624,6 +651,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        const mergeSyncedNotebook = ${mergeSyncedNotebookSource};
         let notebook = ${JSON.stringify(notebook)};
 
         // Initialize global variables if not present
@@ -672,6 +700,40 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             Object.entries(vars).forEach(([key, value]) => {
                 addVariableRow(key, value);
             });
+        }
+
+        function renderVariablesPreservingState() {
+            const container = document.getElementById('variables-list');
+            const rows = Array.from(container.querySelectorAll('.variable-row'));
+            const activeInput = document.activeElement instanceof HTMLInputElement &&
+                container.contains(document.activeElement)
+                ? document.activeElement
+                : null;
+            const activeRow = activeInput && activeInput.closest('.variable-row');
+            const activeRowIndex = activeRow ? rows.indexOf(activeRow) : -1;
+            const activeInputName = activeInput?.name;
+            const selectionStart = activeInput?.selectionStart;
+            const selectionEnd = activeInput?.selectionEnd;
+            const selectionDirection = activeInput?.selectionDirection;
+            const scrollTop = container.scrollTop;
+            const scrollLeft = container.scrollLeft;
+
+            renderVariables();
+            container.scrollTop = scrollTop;
+            container.scrollLeft = scrollLeft;
+
+            if (activeRowIndex >= 0 && activeInputName && selectionStart !== null && selectionEnd !== null) {
+                const replacementRow = container.querySelectorAll('.variable-row')[activeRowIndex];
+                const replacementInput = replacementRow?.querySelector('input[name="' + activeInputName + '"]');
+                if (replacementInput) {
+                    replacementInput.focus();
+                    replacementInput.setSelectionRange(
+                        Math.min(selectionStart, replacementInput.value.length),
+                        Math.min(selectionEnd, replacementInput.value.length),
+                        selectionDirection
+                    );
+                }
+            }
         }
 
         function addVariable() {
@@ -858,10 +920,57 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             saveNotebook(true);
         }
 
+        function syncNotebook(nextNotebook) {
+            if (nextNotebook.cells.length !== notebook.cells.length ||
+                nextNotebook.cells.some((cell, index) => cell.type !== notebook.cells[index].type)) {
+                return;
+            }
+
+            const previousNotebook = notebook;
+            const savedNotebook = JSON.parse(lastSavedJson);
+            const variablesChanged = JSON.stringify(previousNotebook.globalVariables || {}) !==
+                JSON.stringify(nextNotebook.globalVariables || {});
+
+            notebook = mergeSyncedNotebook(savedNotebook, previousNotebook, nextNotebook);
+            // The incoming snapshot is persisted. Any local-only edits remain
+            // dirty and will be written by this panel's pending autosave.
+            lastSavedJson = JSON.stringify(nextNotebook);
+            notebook.cells.forEach((cell, index) => {
+                const previousCell = previousNotebook.cells[index];
+                const textarea = document.querySelector(
+                    \`#cell-\${index} textarea[data-cell-index]\`
+                );
+                if (textarea && textarea.value !== cell.content) {
+                    const selectionStart = textarea.selectionStart;
+                    const selectionEnd = textarea.selectionEnd;
+                    const selectionDirection = textarea.selectionDirection;
+                    const scrollTop = textarea.scrollTop;
+                    const scrollLeft = textarea.scrollLeft;
+                    textarea.value = cell.content;
+                    textarea.setSelectionRange(
+                        Math.min(selectionStart, textarea.value.length),
+                        Math.min(selectionEnd, textarea.value.length),
+                        selectionDirection
+                    );
+                    textarea.scrollTop = scrollTop;
+                    textarea.scrollLeft = scrollLeft;
+                }
+                if (JSON.stringify(previousCell.output) !== JSON.stringify(cell.output)) {
+                    renderCellOutput(index);
+                }
+            });
+            if (variablesChanged) {
+                renderVariablesPreservingState();
+            }
+        }
+
         // Listen for messages from extension
         window.addEventListener('message', event => {
             const message = event.data;
             switch (message.command) {
+                case 'syncNotebook':
+                    syncNotebook(message.notebook);
+                    break;
                 case 'cellResult':
                     updateCellOutput(message.index, message.output, message.error);
                     break;
