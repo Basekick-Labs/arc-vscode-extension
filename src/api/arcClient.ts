@@ -11,6 +11,7 @@ import {
   MeasurementInfo
 } from '../types';
 import { filterValidNames } from '../utils/sqlUtils.js';
+import { validateDatabaseName } from '../utils/databaseNames';
 import {
   ArcAccessError,
   classifyArcError
@@ -205,7 +206,9 @@ export class ArcClient {
   }
 
   /**
-   * List all measurements (tables) in a database
+   * List measurements through Arc's database-scoped endpoint. This avoids
+   * guessing column positions in SHOW TABLES responses and lets Arc apply
+   * per-database RBAC before returning names.
    */
   async getMeasurements(database?: string): Promise<MeasurementInfo[]> {
     try {
@@ -231,13 +234,10 @@ export class ArcClient {
         const idx = rows[0].length > 1 ? 1 : 0;
         return filterValidNames(rows.map((row: any[]) => row[idx])).map(name => ({ name }));
       }
-
-      return [];
+      return filterValidNames(measurements.map((item: any) =>
+        typeof item === 'string' ? item : item?.name
+      )).map(name => ({ name }));
     } catch (error) {
-      // A refusal is Arc's decision, not a reason to try another route to the
-      // same data: `/api/v1/measurements` applies the same per-database check
-      // and answers identically, so the fallback would only double the
-      // requests and the audit entries. Surface it.
       const refusal = this.asAccessError(error);
       if (refusal) {
         throw refusal;
@@ -263,7 +263,6 @@ export class ArcClient {
         }
         console.warn('Both SHOW TABLES and /measurements failed:', describeForLog(endpointError));
       }
-
       throw this.handleError(error);
     }
   }
@@ -305,21 +304,14 @@ export class ArcClient {
   }
 
   /**
-   * List all databases using SHOW DATABASES SQL query
+   * List databases using Arc's first-class database API.
    */
   async getDatabases(): Promise<string[]> {
     try {
-      // Arc supports SHOW DATABASES SQL query
-      const response = await this.client.post('/api/v1/query', {
-        sql: 'SHOW DATABASES;'  // Arc API expects 'sql' not 'query'
-      });
-
-      const responseData = response.data;
-
-      // Response format: { columns: ['database'], data: [['default'], ['production'], ...] }
-      const rows = responseData.data || responseData.rows || [];
-      if (Array.isArray(rows)) {
-        return filterValidNames(rows.map((row: any[]) => row[0]));
+      const response = await this.client.get('/api/v1/databases');
+      const databases = response.data?.databases;
+      if (!Array.isArray(databases)) {
+        throw new Error('Unexpected database listing response from Arc');
       }
 
       return [];
@@ -332,11 +324,77 @@ export class ArcClient {
       // instead), so a refusal is a normal state the caller can degrade from;
       // an unreachable server or a server fault is reported as what it is.
       const refusal = this.asAccessError(error);
-      if (refusal) {
-        throw refusal;
+      if (refusal) throw refusal;
+      // Older Arc versions may not expose the database resource route yet.
+      // Fall back to SHOW DATABASES only for a missing route; a 401/403 from
+      // either endpoint is surfaced rather than turned into a fake database.
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        try {
+          const legacy = await this.client.post('/api/v1/query', { sql: 'SHOW DATABASES;' });
+          const rows = legacy.data?.data || legacy.data?.rows || [];
+          if (Array.isArray(rows)) {
+            return filterValidNames(rows.map((row: any[]) => row[0]));
+          }
+        } catch (fallbackError) {
+          const fallbackRefusal = this.asAccessError(fallbackError);
+          if (fallbackRefusal) throw fallbackRefusal;
+          console.warn('Legacy SHOW DATABASES fallback failed:', fallbackError);
+        }
       }
       throw this.handleError(error);
     }
+  }
+
+  /** Create a database through Arc's admin-protected database API. */
+  async createDatabase(name: string): Promise<void> {
+    const validation = validateDatabaseName(name);
+    if (validation) throw new Error(validation);
+    try {
+      await this.client.post('/api/v1/databases', { name });
+    } catch (error) {
+      throw this.handleDatabaseMutationError(error, 'create');
+    }
+  }
+
+  /**
+   * Delete a database after the UI has confirmed the destructive action.
+   * Arc requires both an admin token and the explicit `confirm=true` query.
+   */
+  async deleteDatabase(name: string): Promise<void> {
+    const validation = validateDatabaseName(name);
+    if (validation) throw new Error(validation);
+    try {
+      await this.client.delete(`/api/v1/databases/${encodeURIComponent(name)}`, {
+        params: { confirm: 'true' }
+      });
+    } catch (error) {
+      throw this.handleDatabaseMutationError(error, 'delete');
+    }
+  }
+
+  private handleDatabaseMutationError(error: unknown, operation: 'create' | 'delete'): Error {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const detail = serverErrorMessage(error.response?.data);
+      if (status === 403) {
+        // Delete can also be disabled server-side or target a reserved name;
+        // neither is an admin-token problem. A broken permission store is a
+        // server fault, not a reason to rotate the token.
+        if (detail && /delete operations are disabled|reserved database/i.test(detail)) {
+          return new Error(detail);
+        }
+        if (detail && /permission data unavailable/i.test(detail)) {
+          return new Error(`${detail} This is a server-side fault; check the Arc server log.`);
+        }
+        if (detail && /enterprise license/i.test(detail)) return new Error(detail);
+        return new Error(`${detail || `Arc refused to ${operation} the database.`} This operation requires an admin token.`);
+      }
+      if (detail) return new Error(detail);
+      if (status === 400 || status === 404 || status === 409) {
+        return new Error(`Arc could not ${operation} the database.`);
+      }
+    }
+    return this.handleError(error);
   }
 
   /**
