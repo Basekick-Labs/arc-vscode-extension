@@ -305,6 +305,12 @@ export class ArcClient {
         Object.keys(point.fields ?? {}).forEach(k => fieldKeys.add(k));
       }
 
+      // The timestamp column is generated from point.timestamp and cannot be
+      // replaced by a user-provided tag. Field collisions are rejected below.
+      if (tagKeys.has('time')) {
+        throw new Error('Column "time" is reserved for timestamps and cannot be used as a tag');
+      }
+
       const columns: Record<string, any[]> = {
         time: data.map(p => p.timestamp ?? Date.now())
       };
