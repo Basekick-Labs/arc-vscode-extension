@@ -102,6 +102,11 @@
         "icon": "$(edit)"
       },
       {
+        "command": "arc.setConnectionDatabase",
+        "title": "Arc: Set Connection Database",
+        "icon": "$(database)"
+      },
+      {
         "command": "arc.deleteConnection",
         "title": "Arc: Delete Connection",
         "icon": "$(trash)"
@@ -409,6 +414,11 @@
         },
         {
           "command": "arc.editConnection",
+          "when": "view == arcConnections && viewItem == connection",
+          "group": "connection@1"
+        },
+        {
+          "command": "arc.setConnectionDatabase",
           "when": "view == arcConnections && viewItem == connection",
           "group": "connection@1"
         },

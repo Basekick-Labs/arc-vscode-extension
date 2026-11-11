@@ -1,20 +1,27 @@
 /**
  * Classification of Arc's refusals.
  *
- * Arc restricts reads per database. A token can hold the coarse `read`
- * permission and still be refused for a database its grants do not cover, and
- * Arc will not answer a list-everything request with a filtered list — a
- * scoped caller has to name a database, the same bar `SHOW DATABASES` applies.
+ * Arc restricts reads per database (and, with RBAC, per measurement). A token
+ * can hold the coarse `read` permission and still be refused for a database
+ * or measurement its grants do not cover. How Arc answers a list-everything
+ * request for such a token depends on the version:
  *
- * That makes HTTP 403 ambiguous: it is the answer to three different
- * questions, and Arc tells them apart only by message. This module is the one
- * place that reads those messages, so the extension never has to guess:
+ *   - Arc 26.09 and earlier refuse it (`SHOW DATABASES` answers 403 "no read
+ *     permission to list databases"); a scoped caller has to name a database.
+ *   - Newer Arc returns only the databases the token can read.
+ *
+ * HTTP 403 is therefore ambiguous, and Arc tells the cases apart only by
+ * message. This module is the one place that reads those messages, so the
+ * extension never has to guess:
  *
  *   - **scoped** — the token may read, but not what was asked for. Normal for
- *     a tenant-scoped token, not a fault. Retrying is pointless; naming a
- *     database the token is granted is the only thing that helps.
+ *     a tenant-scoped token, not a fault. Naming a database (or measurement)
+ *     the token is granted is the only thing that helps.
  *   - **forbidden** — the token carries no read permission at all. A
  *     different token is needed; naming a database will not help.
+ *   - **denied** — any other refusal: the token lacks admin, write or delete,
+ *     or the server has the operation turned off. Arc's own message says
+ *     which, so it is shown as is. Only *read* refusals are reworded.
  *   - **unavailable** — Arc could not read its own permission data and
  *     refused rather than guess. A server-side fault that says nothing about
  *     the token or the database.
@@ -26,9 +33,10 @@
 /** What Arc's refusal means, and therefore what the user should do. */
 export type ArcErrorKind =
   | 'auth'          // 401: token missing, invalid or expired
-  | 'scoped'        // 403: may read, but not this database
+  | 'scoped'        // 403: may read, but not this database / measurement
   | 'forbidden'     // 403: no read permission at all
-  | 'unavailable'   // 403: Arc could not load the grants (server fault)
+  | 'denied'        // 403: any non-read refusal (admin, write, delete, disabled operation)
+  | 'unavailable'   // 503 (or 403 on older Arc): Arc could not load the grants (server fault)
   | 'license'       // 403: feature needs an enterprise license
   | 'not_found'     // 404
   | 'network'       // could not reach the server
@@ -44,59 +52,74 @@ export interface ArcErrorInfo {
    * for every database (Arc then sends `*`, an empty name, or no name at all).
    */
   database?: string;
+  /** For `scoped`: the measurement Arc named, when the refusal was for one. */
+  measurement?: string;
   /** Arc's own message, when it sent one. */
   serverMessage?: string;
 }
 
 /**
- * The bodies Arc sends on a refusal. All the 403s share a status code and
- * differ only in message, so the message is the whole discriminator.
+ * The read refusals Arc sends, and what each one means. Matching is anchored
+ * on the permission word `read`: Arc uses the same shapes for write and
+ * delete (`access denied: no write permission for db.m`), and those must not
+ * be reported as a read problem.
  *
- * From the handler gates on the query path, which is what this extension
- * uses (`SHOW DATABASES`, `SHOW TABLES FROM db`, `GET /api/v1/measurements`):
+ * Query path (`SHOW DATABASES`, `SHOW TABLES FROM db`, SELECT,
+ * `GET /api/v1/measurements`):
  *
- *   access denied: no read permission to list databases      -> scoped (no name)
+ *   access denied: no read permission to list databases      -> scoped (Arc 26.09 and earlier)
  *   access denied: no read permission for database 'x'       -> scoped ('x')
+ *   access denied: no read permission for x.m                -> scoped ('x', measurement 'm')
  *   access denied: no read permission for x.*                -> scoped ('x')
+ *   access denied: no read permission for *.*                -> scoped (no name)
  *
- * From the resource-scoped read middleware, which the database listing
- * endpoints use — included so this classifier stays correct if the extension
- * ever calls them, and because Arc may move a route behind it:
+ * Coarse refusal, which means the token has no read permission:
  *
- *   no permission for read on database 'x'                   -> scoped ('x')
- *
- * Coarse refusals, which mean the token has no read permission:
- *
- *   token does not have 'read' permission                    -> forbidden
  *   Permission denied: read required                         -> forbidden
  *
- * And the fail-closed answer, checked first because a broken permission store
- * must never be reported as a scoping state:
+ * Fail-closed answer when Arc main cannot read its grants (at the query door):
  *
- *   permission data unavailable                              -> unavailable
+ *   503 Permission store unavailable; retry later (reason hub_unavailable)  -> unavailable
  *
- * Matching is by stable fragment rather than whole string, so a change to the
- * permission word or the surrounding punctuation cannot silently reclassify
- * one as another.
+ * Arc's query path reports every RBAC denial for a table, including a grant
+ * lookup that failed, as `no read permission for db.m`, so those always read
+ * as a measurement-level refusal; only Arc can tell them apart.
+ *
+ * Also matched, defensively: `no permission for read on database 'x'`
+ * (scoped), `token does not have 'read' permission` (forbidden) and 403
+ * `permission data unavailable` (unavailable). These are Arc's internal
+ * reasons; neither 26.09.4 nor main sends them as a response body today.
  */
 const PERMISSION_DATA_UNAVAILABLE = 'permission data unavailable';
+const PERMISSION_STORE_UNAVAILABLE = 'permission store unavailable';
+const HUB_UNAVAILABLE_REASON = 'hub_unavailable';
 
-/** `access denied: no <perm> permission for database 'x'` */
-const GATE_DATABASE_RE = /^access denied: no \w+ permission for database '([^']*)'/i;
-/** `access denied: no <perm> permission for <db>.<measurement>` */
-const GATE_MEASUREMENT_RE = /^access denied: no \w+ permission for ([^\s.]+)\./i;
-/** `access denied: no <perm> permission to list databases` — names none */
-const GATE_LIST_RE = /^access denied: no \w+ permission to list databases/i;
-/** `no permission for <perm> on database 'x'` */
-const MIDDLEWARE_RE = /^no permission for \w+ on database '([^']*)'/i;
+/** `access denied: no read permission to list databases` — names none */
+const GATE_LIST_RE = /^access denied: no read permission to list databases/i;
+/** `access denied: no read permission for database 'x'` */
+const GATE_DATABASE_RE = /^access denied: no read permission for database '([^']*)'/i;
+/** `access denied: no read permission for <db>.<measurement>` */
+const GATE_MEASUREMENT_RE = /^access denied: no read permission for ([^\s.']+)\.(\S+)/i;
+/** `no permission for read on database 'x'` */
+const MIDDLEWARE_RE = /^no permission for read on database '([^']*)'/i;
+/** The coarse "no read permission at all" refusals. */
+const NO_READ_RES = [
+  /^permission denied: read required/i,
+  /^token does not have 'read' permission/i
+];
+
+/** A name Arc sent that is a real database or measurement, not a wildcard. */
+function named(name: string | undefined): string | undefined {
+  return name && name !== '*' ? name : undefined;
+}
 
 /**
  * Classify a 403 by its message. Returns the kind and, for a scoped refusal,
- * the database Arc named — `undefined` when Arc named none, or named the
- * wildcard, because "name a database" is the advice in both cases and
- * `"*"` is not a database a user can be told to pick.
+ * the database (and measurement) Arc named — `undefined` when Arc named none,
+ * or named the wildcard, because `"*"` is not something a user can be told to
+ * pick.
  */
-function classifyForbidden(message: string): { kind: ArcErrorKind; database?: string } {
+function classifyForbidden(message: string): Pick<ArcErrorInfo, 'kind' | 'database' | 'measurement'> {
   const text = message.trim();
   const lower = text.toLowerCase();
 
@@ -112,27 +135,35 @@ function classifyForbidden(message: string): { kind: ArcErrorKind; database?: st
   if (GATE_LIST_RE.test(text)) {
     return { kind: 'scoped' };
   }
-  for (const pattern of [GATE_DATABASE_RE, GATE_MEASUREMENT_RE, MIDDLEWARE_RE]) {
+  for (const pattern of [GATE_DATABASE_RE, MIDDLEWARE_RE]) {
     const match = pattern.exec(text);
     if (match) {
-      const name = match[1];
-      return { kind: 'scoped', database: name && name !== '*' ? name : undefined };
+      return { kind: 'scoped', database: named(match[1]) };
     }
   }
-  // An unrecognised 403 is reported as a missing permission on purpose:
-  // naming the token's permissions is safe to say about any refusal, whereas
-  // telling someone to pick a database they may already have picked is not.
-  return { kind: 'forbidden' };
+  const measurement = GATE_MEASUREMENT_RE.exec(text);
+  if (measurement) {
+    const database = named(measurement[1]);
+    return { kind: 'scoped', database, measurement: database ? named(measurement[2]) : undefined };
+  }
+  if (NO_READ_RES.some(re => re.test(text))) {
+    return { kind: 'forbidden' };
+  }
+  // Anything else is a refusal Arc already explains: a missing admin, write or
+  // delete permission, or an operation the server has turned off. Rewording
+  // it as a read problem would send the user to fix the wrong thing.
+  return { kind: 'denied' };
 }
 
 /**
- * Describe an error from an Arc request. `status` and `serverMessage` come
- * from the caller so this stays independent of the HTTP library.
+ * Describe an error from an Arc request. `status`, `serverMessage` and
+ * `reason` come from the caller so this stays independent of the HTTP library.
  */
 export function classifyArcError(
   status: number | undefined,
   serverMessage: string | undefined,
   networkCode?: string,
+  reason?: string,
 ): ArcErrorInfo {
   if (status === undefined) {
     return { kind: networkCode ? 'network' : 'server', serverMessage };
@@ -141,14 +172,22 @@ export function classifyArcError(
     return { kind: 'auth', status, serverMessage };
   }
   if (status === 403) {
-    const { kind, database } = classifyForbidden(serverMessage ?? '');
-    return { kind, status, database, serverMessage };
+    return { ...classifyForbidden(serverMessage ?? ''), status, serverMessage };
+  }
+  if (status === 503 && (
+    reason === HUB_UNAVAILABLE_REASON ||
+    (serverMessage ?? '').toLowerCase().includes(PERMISSION_STORE_UNAVAILABLE)
+  )) {
+    return { kind: 'unavailable', status, serverMessage };
   }
   if (status === 404) {
     return { kind: 'not_found', status, serverMessage };
   }
   return { kind: 'server', status, serverMessage };
 }
+
+/** The command a user runs to point a connection at one database. */
+export const SET_DATABASE_HINT = 'run "Arc: Set Connection Database"';
 
 /**
  * A sentence that names the fix, for the status bar, a toast, or a tree item.
@@ -159,13 +198,18 @@ export function arcErrorMessage(info: ArcErrorInfo): string {
     case 'auth':
       return 'Arc rejected the token — it is missing, invalid or expired. Update the connection\'s token.';
     case 'scoped':
+      if (info.database && info.measurement) {
+        return `This token has no read access to measurement '${info.database}.${info.measurement}'. Other measurements in '${info.database}' may still be readable.`;
+      }
       return info.database
-        ? `This token has no read access to database '${info.database}'. It may be able to read others — set a different database on this connection.`
-        : 'This token is restricted to specific databases, so Arc will not list them all. Set the database on this connection to one the token can read.';
+        ? `This token has no read access to database '${info.database}'. It may be able to read others.`
+        : `This token is restricted to specific databases, and this Arc server will not list them all for it. To browse one the token can read, ${SET_DATABASE_HINT}.`;
     case 'forbidden':
       return 'This token does not carry the read permission Arc requires. Use a token with read permission.';
+    case 'denied':
+      return info.serverMessage ?? 'Arc refused the request.';
     case 'unavailable':
-      return 'Arc could not read its own permission data and refused the request rather than guessing. This is a server-side fault — check the Arc server log.';
+      return 'Arc could not read its own permission data and refused the request rather than guessing. This is a server-side fault — retry later, or check the Arc server log.';
     case 'license':
       return info.serverMessage ?? 'This Arc feature requires an enterprise license.';
     case 'not_found':

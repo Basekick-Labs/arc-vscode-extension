@@ -27,7 +27,7 @@ See **[FEATURES.md](FEATURES.md)** for the full guide.
 
 Requires VS Code 1.85+, a reachable Arc instance, and an Arc authentication token with `read` permission.
 
-Arc can restrict a token's reads to particular databases. The extension works with such a token, but it cannot enumerate databases with one — Arc refuses to list them all rather than returning a partial list, the same way `SHOW DATABASES` does. Set the database on the connection and the explorer, completions and queries all use that one; the explorer says so in place of the database list rather than failing silently.
+Arc can restrict a token's reads to particular databases. Newer Arc lists only the databases such a token can read. Arc 26.09 and earlier refuse to list them at all, so set a database on the connection — when connecting, with **Edit Connection**, or with **Arc: Set Connection Database** — and the explorer, completions and schema views use that one. Queries you write name their database in the SQL (`SELECT ... FROM db.measurement`).
 
 ## Settings
 
@@ -95,9 +95,11 @@ Turn it off with `arc.telemetry.enabled`, or disable telemetry across VS Code wi
 
 **Cannot connect** - check Arc is up (`curl http://localhost:8000/health`), confirm host and port, then run **Arc: Verify Token**.
 
-**"Token is scoped - set a database on this connection"** - the token can read, but Arc will not list every database for it. Edit the connection and set its database to one the token is granted. This is not a failure; it is what a database-scoped token looks like.
+**"Token is scoped — click to set this connection's database"** - the token can read, but this Arc server (26.09 or earlier) will not list every database for it. Click the node, or run **Arc: Set Connection Database**, and enter a database the token is granted. This is not a failure; it is what a database-scoped token looks like.
 
 **"This token does not carry the read permission Arc requires"** - a different problem from the above, and naming a database will not fix it: create or use a token that includes `read`.
+
+**Other refusals** (admin required, write required, deletion disabled on the server) are shown exactly as Arc reports them.
 
 **Query timeout** - add a time filter (`WHERE time > now() - INTERVAL 1 HOUR`) and a `LIMIT`, or raise `arc.queryTimeout`.
 

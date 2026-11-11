@@ -5,11 +5,12 @@
  * against the compiled output, so nothing here may touch the `vscode` module —
  * the classifier and the Arc HTTP client are both free of it on purpose.
  *
- * Every body below is one Arc actually sends. The 403s all share a status code
+ * Every body below is one Arc actually sends (main and 26.09.4; the source
+ * location is noted where it is not obvious). The 403s all share a status code
  * and differ only in message, which is exactly why they are easy to collapse
- * and worth pinning: reporting a scoped token as a bad token, or a broken
- * permission store as a scoped token, sends the user somewhere that cannot
- * fix the problem.
+ * and worth pinning: reporting a scoped token as a bad token, a missing admin
+ * permission as a missing read permission, or a broken permission store as a
+ * scoped token, sends the user somewhere that cannot fix the problem.
  */
 
 import assert from 'node:assert/strict';
@@ -31,20 +32,35 @@ const NO_READ = { success: false, error: "token does not have 'read' permission"
 const OSS_NO_READ = { success: false, error: 'Permission denied: read required' };
 
 // The handler gates on the query path, which is what this extension uses.
+// SHOW DATABASES for a scoped token: Arc 26.09 and earlier (newer Arc lists).
 const SCOPED_LIST = { success: false, error: 'access denied: no read permission to list databases' };
 const SCOPED_DB = { success: false, error: "access denied: no read permission for database 'metrics'" };
+// SELECT on a measurement the token's role does not cover (query.go "%s.%s").
+const SCOPED_ONE_MEASUREMENT = { success: false, error: 'access denied: no read permission for metrics.mem' };
 const SCOPED_MEASUREMENT = { success: false, error: 'access denied: no read permission for metrics.*' };
-const SCOPED_WILDCARD = { success: false, error: "access denied: no read permission for database '*'" };
+// Unscoped /api/v1/measurements for a scoped token on 26.09.4.
+const SCOPED_WILDCARD = { success: false, error: 'access denied: no read permission for *.*' };
 
 // The resource-scoped read middleware, used by the database listing routes.
 const SCOPED_MIDDLEWARE = { success: false, error: "no permission for read on database 'metrics'" };
 const SCOPED_MIDDLEWARE_EMPTY = { success: false, error: "no permission for read on database ''" };
 
-// Arc could not load the token's grants and refused rather than guess.
+// Arc could not load the token's grants and refused rather than guess. Arc
+// main answers 503 at the query door (auth/middleware.go); the 403 shape is
+// kept for older servers.
+const STORE_UNAVAILABLE = { success: false, error: 'Permission store unavailable; retry later', reason: 'hub_unavailable' };
 const UNAVAILABLE = { success: false, error: 'permission data unavailable' };
+
+// Refusals that are NOT about reading: shown as Arc wrote them.
+const ADMIN_REQUIRED = { success: false, error: 'Permission denied: admin required' };
+const WRITE_REQUIRED = { success: false, error: 'Permission denied: write required' };
+const NO_WRITE_FOR_MEASUREMENT = { success: false, error: 'access denied: no write permission for metrics.cpu' };
+const DELETE_DISABLED = { success: false, error: 'Delete operations are disabled. Set delete.enabled=true in arc.toml to enable.' };
+const INSUFFICIENT = { success: false, error: 'Insufficient permissions' };
 
 const LICENSE = { success: false, error: "RBAC requires an enterprise license with the 'rbac' feature enabled" };
 const NOT_FOUND = { error: "Database 'ghost' not found" };
+const NO_ROUTE = { error: 'Cannot GET /api/v1/nope' };
 
 const SHOW_DATABASES_OK = { success: true, columns: ['database'], data: [['metrics'], ['logs']] };
 const SHOW_TABLES_OK = { success: true, columns: ['database', 'table_name'], data: [['metrics', 'cpu']] };
@@ -71,22 +87,30 @@ function client(): { arc: ArcClient; mock: MockAdapter } {
 // --- classifyArcError -------------------------------------------------------
 
 describe('classifyArcError', () => {
-  const cases: Array<{ name: string; status: number; body: object; kind: string; database?: string }> = [
+  const cases: Array<{ name: string; status: number; body: { error?: string; reason?: string }; kind: string; database?: string; measurement?: string }> = [
     { name: '401 with no token', status: 401, body: NO_TOKEN, kind: 'auth' },
     { name: '401 with a bad token', status: 401, body: BAD_TOKEN, kind: 'auth' },
 
     { name: 'SHOW DATABASES refused for a scoped token', status: 403, body: SCOPED_LIST, kind: 'scoped' },
     { name: 'SHOW TABLES FROM db refused', status: 403, body: SCOPED_DB, kind: 'scoped', database: 'metrics' },
     { name: 'measurement listing refused', status: 403, body: SCOPED_MEASUREMENT, kind: 'scoped', database: 'metrics' },
+    { name: 'one measurement refused, database still readable', status: 403, body: SCOPED_ONE_MEASUREMENT, kind: 'scoped', database: 'metrics', measurement: 'mem' },
     { name: 'wildcard is not a database to suggest', status: 403, body: SCOPED_WILDCARD, kind: 'scoped' },
     { name: 'listing middleware, named database', status: 403, body: SCOPED_MIDDLEWARE, kind: 'scoped', database: 'metrics' },
     { name: 'listing middleware, no database sent', status: 403, body: SCOPED_MIDDLEWARE_EMPTY, kind: 'scoped' },
 
     { name: 'token has no read permission', status: 403, body: NO_READ, kind: 'forbidden' },
     { name: 'server without per-database reads', status: 403, body: OSS_NO_READ, kind: 'forbidden' },
-    { name: 'grants could not be loaded', status: 403, body: UNAVAILABLE, kind: 'unavailable' },
+    { name: 'permission store down (Arc main, 503)', status: 503, body: STORE_UNAVAILABLE, kind: 'unavailable' },
+    { name: 'grants could not be loaded (older 403)', status: 403, body: UNAVAILABLE, kind: 'unavailable' },
     { name: 'licence-gated feature', status: 403, body: LICENSE, kind: 'license' },
-    { name: 'unrecognised 403 falls back to forbidden', status: 403, body: { error: 'Delete operations are disabled.' }, kind: 'forbidden' },
+
+    { name: 'admin required is not a read problem', status: 403, body: ADMIN_REQUIRED, kind: 'denied' },
+    { name: 'write required is not a read problem', status: 403, body: WRITE_REQUIRED, kind: 'denied' },
+    { name: 'a write gate on a measurement is not a read problem', status: 403, body: NO_WRITE_FOR_MEASUREMENT, kind: 'denied' },
+    { name: 'deletion disabled on the server', status: 403, body: DELETE_DISABLED, kind: 'denied' },
+    { name: 'insufficient permissions', status: 403, body: INSUFFICIENT, kind: 'denied' },
+    { name: 'an ordinary 503 is a server error', status: 503, body: { error: 'Service unavailable' }, kind: 'server' },
 
     { name: '404', status: 404, body: NOT_FOUND, kind: 'not_found' },
     { name: '500', status: 500, body: { error: 'boom' }, kind: 'server' }
@@ -94,10 +118,11 @@ describe('classifyArcError', () => {
 
   for (const c of cases) {
     it(c.name, () => {
-      const info = classifyArcError(c.status, (c.body as { error?: string }).error);
+      const info = classifyArcError(c.status, c.body.error, undefined, c.body.reason);
       assert.equal(info.kind, c.kind);
       assert.equal(info.status, c.status);
       assert.equal(info.database, c.database);
+      assert.equal(info.measurement, c.measurement);
     });
   }
 
@@ -106,9 +131,9 @@ describe('classifyArcError', () => {
     assert.equal(classifyArcError(undefined, undefined).kind, 'server');
   });
 
-  it('does not treat a missing message as a scoping state', () => {
-    assert.equal(classifyArcError(403, undefined).kind, 'forbidden');
-    assert.equal(classifyArcError(403, '').kind, 'forbidden');
+  it('does not treat a missing message as a scoping or read state', () => {
+    assert.equal(classifyArcError(403, undefined).kind, 'denied');
+    assert.equal(classifyArcError(403, '').kind, 'denied');
   });
 });
 
@@ -118,11 +143,26 @@ describe('arcErrorMessage', () => {
   it('tells a scoped caller to set a database, and names it when Arc did', () => {
     const named = arcErrorMessage({ kind: 'scoped', status: 403, database: 'metrics' });
     assert.match(named, /no read access to database 'metrics'/);
-    assert.match(named, /set a different database/i);
+    // A database named in a refusal comes from a query or a measurement
+    // listing, where the connection's database does not change the answer.
+    assert.doesNotMatch(named, /Set Connection Database/);
 
     const unnamed = arcErrorMessage({ kind: 'scoped', status: 403 });
     assert.match(unnamed, /restricted to specific databases/i);
-    assert.match(unnamed, /Set the database on this connection/i);
+    assert.match(unnamed, /Arc: Set Connection Database/);
+  });
+
+  it('names the measurement, not the database, when only a measurement is refused', () => {
+    const message = arcErrorMessage({ kind: 'scoped', status: 403, database: 'metrics', measurement: 'mem' });
+    assert.match(message, /measurement 'metrics\.mem'/);
+    assert.match(message, /Other measurements in 'metrics' may still be readable/);
+    assert.doesNotMatch(message, /no read access to database/);
+  });
+
+  it('shows a non-read refusal exactly as Arc wrote it', () => {
+    for (const body of [ADMIN_REQUIRED, WRITE_REQUIRED, DELETE_DISABLED, NO_WRITE_FOR_MEASUREMENT]) {
+      assert.equal(arcErrorMessage(classifyArcError(403, body.error)), body.error);
+    }
   });
 
   it('keeps the four refusals distinct and never quotes a bare status', () => {
@@ -153,8 +193,8 @@ describe('ArcClient.getDatabases', () => {
 
   const refusals: Array<{ name: string; status: number; body: object; kind: string }> = [
     { name: 'a scoped token', status: 403, body: SCOPED_LIST, kind: 'scoped' },
-    { name: 'a token with no read permission', status: 403, body: NO_READ, kind: 'forbidden' },
-    { name: 'an unreadable permission store', status: 403, body: UNAVAILABLE, kind: 'unavailable' },
+    { name: 'a token with no read permission', status: 403, body: OSS_NO_READ, kind: 'forbidden' },
+    { name: 'an unreadable permission store', status: 503, body: STORE_UNAVAILABLE, kind: 'unavailable' },
     { name: 'a rejected token', status: 401, body: BAD_TOKEN, kind: 'auth' }
   ];
 
@@ -178,18 +218,23 @@ describe('ArcClient.getDatabases', () => {
     });
   }
 
-  it('still falls back to one database when the server is unreachable', async () => {
-    // A transport failure is not a refusal, and the lenient behaviour there
-    // is deliberate: the tree keeps a root to retry from.
+  it('reports an unreachable server instead of inventing a database', async () => {
     const { arc, mock } = client();
     mock.onPost('/api/v1/query').networkError();
-    assert.deepEqual(await arc.getDatabases(), ['default']);
+    await assert.rejects(() => arc.getDatabases(), (error: unknown) => !(error instanceof ArcAccessError));
   });
 
-  it('still falls back to one database on a server fault', async () => {
+  it('reports a server fault with Arc\'s message instead of inventing a database', async () => {
     const { arc, mock } = client();
-    mock.onPost('/api/v1/query').reply(500, { error: 'boom' });
-    assert.deepEqual(await arc.getDatabases(), ['default']);
+    mock.onPost('/api/v1/query').reply(500, { success: false, error: 'boom' });
+    await assert.rejects(() => arc.getDatabases(), /boom/);
+  });
+
+  it('returns an empty list, not a made-up one, when Arc lists nothing', async () => {
+    // Newer Arc answers a scoped token whose databases hold no data this way.
+    const { arc, mock } = client();
+    mock.onPost('/api/v1/query').reply(200, { success: true, columns: ['database'], data: [] });
+    assert.deepEqual(await arc.getDatabases(), []);
   });
 });
 
@@ -227,9 +272,27 @@ describe('ArcClient.getMeasurements', () => {
   it('still falls back to /api/v1/measurements when the query itself fails', async () => {
     const { arc, mock } = client();
     mock.onPost('/api/v1/query').reply(500, { error: 'boom' });
-    mock.onGet('/api/v1/measurements').reply(200, { measurements: ['cpu', 'mem'] });
+    // The shape Arc sends (main and 26.09.4).
+    mock.onGet('/api/v1/measurements').reply(200, {
+      count: 2,
+      measurements: [
+        { database: 'metrics', measurement: 'cpu' },
+        { database: 'metrics', measurement: 'mem' }
+      ]
+    });
 
     assert.deepEqual(await arc.getMeasurements('metrics'), [{ name: 'cpu' }, { name: 'mem' }]);
+  });
+
+  it('asks the fallback for the default database when none is given, like SHOW TABLES', async () => {
+    const { arc, mock } = client();
+    mock.onPost('/api/v1/query').reply(500, { error: 'boom' });
+    const fallback = mock.onGet('/api/v1/measurements').reply(200, {
+      measurements: [{ database: 'default', measurement: 'cpu' }]
+    });
+
+    assert.deepEqual(await arc.getMeasurements(), [{ name: 'cpu' }]);
+    assert.equal(fallback.history.get[0].params?.database, 'default');
   });
 
   it('surfaces a refusal raised only by the fallback', async () => {
@@ -241,5 +304,68 @@ describe('ArcClient.getMeasurements', () => {
       () => arc.getMeasurements('metrics'),
       (error: unknown) => error instanceof ArcAccessError && error.info.kind === 'scoped'
     );
+  });
+});
+
+// --- Error messages from every other call -----------------------------------
+
+describe('ArcClient error messages', () => {
+  it('shows Arc\'s own message for a non-read refusal', async () => {
+    const { arc, mock } = client();
+    mock.onPost('/api/v1/auth/tokens').reply(403, ADMIN_REQUIRED);
+    await assert.rejects(() => arc.createToken({ name: 'x' }), { message: 'Permission denied: admin required' });
+  });
+
+  it('keeps Arc\'s explanation of a 400 instead of the HTTP status', async () => {
+    const body = { error: 'partial write: 1 points dropped: 1 in "raw" column "Time": a tag or field named "time" in any letter case (time is the timestamp);' };
+    const { arc, mock } = client();
+    mock.onPost('/api/v1/write/msgpack').reply(400, body);
+    await assert.rejects(
+      // A tag spelled `Time`: Arc rejects every letter case of the timestamp column.
+      () => arc.writeData('raw', [{ tags: Object.fromEntries([['Time', 'x']]), fields: { v: 1 }, timestamp: 1 }]),
+      { message: body.error }
+    );
+  });
+
+  it('keeps a handler\'s 404 message, and explains a missing route', async () => {
+    const { arc, mock } = client();
+    mock.onGet('/api/v1/metrics').reply(404, NOT_FOUND);
+    await assert.rejects(() => arc.getMetrics(), { message: "Database 'ghost' not found" });
+
+    mock.onGet('/api/v1/metrics').reply(404, NO_ROUTE);
+    await assert.rejects(() => arc.getMetrics(), /Endpoint not found/);
+  });
+
+  it('never puts the token in an error or a log line', async () => {
+    const token = 'secret-token-value-123';
+    const arc = new ArcClient(connection, token);
+    const mock = new MockAdapter((arc as unknown as { client: never }).client);
+    mock.onGet('/health').reply(500, { error: 'boom' });
+    mock.onPost('/api/v1/query').reply(500, { error: 'boom' });
+    mock.onGet('/api/v1/measurements').reply(500, { error: 'boom' });
+
+    const logged: string[] = [];
+    const util = await import('node:util');
+    const originals = { log: console.log, warn: console.warn, error: console.error };
+    for (const level of ['log', 'warn', 'error'] as const) {
+      console[level] = (...args: unknown[]) => { logged.push(util.inspect(args, { depth: 8 })); };
+    }
+    const errors: unknown[] = [];
+    try {
+      await arc.healthCheck().catch(e => errors.push(e));
+      await arc.getMeasurements('metrics').catch(e => errors.push(e));
+      await arc.getDatabases().catch(e => errors.push(e));
+    } finally {
+      Object.assign(console, originals);
+    }
+
+    assert.equal(errors.length, 3);
+    for (const error of errors) {
+      assert.doesNotMatch(util.inspect(error, { depth: 8 }), new RegExp(token));
+    }
+    assert.ok(logged.length > 0);
+    for (const line of logged) {
+      assert.doesNotMatch(line, new RegExp(token));
+    }
   });
 });

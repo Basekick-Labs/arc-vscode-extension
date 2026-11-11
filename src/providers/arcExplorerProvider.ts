@@ -35,9 +35,9 @@ export class ArcExplorerProvider implements vscode.TreeDataProvider<ArcTreeItem>
       if (!element) {
         // Root level - show databases.
         //
-        // Arc restricts reads per database, and refuses to list them all for
-        // a token scoped to particular ones rather than returning a filtered
-        // list — the same bar SHOW DATABASES applies. That is a normal state
+        // Arc restricts reads per database. Arc 26.09 and earlier refuse to
+        // list databases for a token scoped to particular ones (newer Arc
+        // returns only the ones it can read). That refusal is a normal state
         // for a tenant token, not a connection failure, and the tree can
         // still be useful: if the connection names a database, show that one
         // and let the user browse it.
@@ -52,14 +52,24 @@ export class ArcExplorerProvider implements vscode.TreeDataProvider<ArcTreeItem>
           if (!active) {
             // Nothing to fall back to: say what is wrong and what fixes it,
             // rather than an empty tree or a raw 403.
-            return [new ArcTreeItem(
-              'Token is scoped — set a database on this connection',
+            const item = new ArcTreeItem(
+              'Token is scoped — click to set this connection\'s database',
               vscode.TreeItemCollapsibleState.None,
               'scoped',
               { message: error.message }
-            )];
+            );
+            item.command = {
+              command: 'arc.setConnectionDatabase',
+              title: 'Set Connection Database'
+            };
+            return [item];
           }
           databases = [active];
+        }
+        if (databases.length === 0) {
+          // Newer Arc answers a scoped token with only the databases it can
+          // read, which is an empty list when none of them holds data yet.
+          return [new ArcTreeItem('No databases visible to this token', vscode.TreeItemCollapsibleState.None, 'info')];
         }
         return databases.map(db => new ArcTreeItem(
           db,
