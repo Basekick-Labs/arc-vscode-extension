@@ -11,6 +11,10 @@ import {
   MeasurementInfo
 } from '../types';
 import { filterValidNames } from '../utils/sqlUtils.js';
+import {
+  ArcAccessError,
+  classifyArcError
+} from '../utils/arcErrors.js';
 
 export class ArcClient {
   private client: AxiosInstance;
@@ -71,7 +75,7 @@ export class ArcClient {
       console.log('[ArcClient] Health check successful:', response.data);
       return response.data;
     } catch (error) {
-      console.error('[ArcClient] Health check failed:', error);
+      console.error('[ArcClient] Health check failed:', describeForLog(error));
       throw this.handleError(error);
     }
   }
@@ -205,7 +209,8 @@ export class ArcClient {
    */
   async getMeasurements(database?: string): Promise<MeasurementInfo[]> {
     try {
-      // SHOW TABLES ignores x-arc-database header -- must use FROM clause.
+      // Name the database with FROM: Arc 26.09 and earlier ignore the
+      // x-arc-database header for SHOW TABLES, and FROM works on every version.
       // Arc's regex only accepts unquoted identifiers ([\w-]+), and database
       // names come from SHOW DATABASES (server-controlled), so no injection risk.
       const sql = database ? `SHOW TABLES FROM ${database};` : 'SHOW TABLES;';
@@ -229,23 +234,74 @@ export class ArcClient {
 
       return [];
     } catch (error) {
-      // Fallback to /measurements endpoint if query fails
-      try {
-        const params = database ? { database } : {};
-        const response = await this.client.get('/api/v1/measurements', { params });
-        const data = response.data;
+      // A refusal is Arc's decision, not a reason to try another route to the
+      // same data: `/api/v1/measurements` applies the same per-database check
+      // and answers identically, so the fallback would only double the
+      // requests and the audit entries. Surface it.
+      const refusal = this.asAccessError(error);
+      if (refusal) {
+        throw refusal;
+      }
 
-        if (Array.isArray(data)) {
-          return data;
-        } else if (data.measurements && Array.isArray(data.measurements)) {
-          return data.measurements.map((name: string) => ({ name }));
+      // Fallback to /measurements endpoint if the query failed for any other
+      // reason (an older server, a transport error). `SHOW TABLES;` without
+      // FROM lists Arc's `default` database, so ask the fallback for the same
+      // one: without a database the endpoint lists every database's
+      // measurements, which is a different answer to the same question.
+      try {
+        const response = await this.client.get('/api/v1/measurements', {
+          params: { database: database ?? 'default' }
+        });
+        const names = measurementNames(response.data);
+        if (names) {
+          return filterValidNames(names).map(name => ({ name }));
         }
       } catch (endpointError) {
-        console.warn('Both SHOW TABLES and /measurements failed:', endpointError);
+        const fallbackRefusal = this.asAccessError(endpointError);
+        if (fallbackRefusal) {
+          throw fallbackRefusal;
+        }
+        console.warn('Both SHOW TABLES and /measurements failed:', describeForLog(endpointError));
       }
 
       throw this.handleError(error);
     }
+  }
+
+  /**
+   * Returns an ArcAccessError when the error is Arc refusing the request —
+   * 401, one of the different things it answers 403 with, or a 503 from its
+   * permission store failing closed — and undefined for anything else.
+   *
+   * Arc's 403s are told apart by message, not by status, so this is the one
+   * place that reads them (see utils/arcErrors.ts). It exists separately from
+   * handleError because callers need to branch on WHICH refusal it was, not
+   * just print it: a scoped token can still work once a database is named,
+   * while a token with no read permission cannot.
+   */
+  private asAccessError(error: unknown): ArcAccessError | undefined {
+    if (error instanceof ArcAccessError) {
+      return error;
+    }
+    if (!axios.isAxiosError(error)) {
+      return undefined;
+    }
+    const status = error.response?.status;
+    if (status !== 401 && status !== 403 && status !== 503) {
+      return undefined;
+    }
+    const info = classifyArcError(
+      status,
+      serverErrorMessage(error.response?.data),
+      undefined,
+      serverErrorReason(error.response?.data)
+    );
+    // A 503 is a refusal only when it is Arc's permission store failing
+    // closed; any other 503 is an ordinary server error.
+    if (status === 503 && info.kind !== 'unavailable') {
+      return undefined;
+    }
+    return new ArcAccessError(info);
   }
 
   /**
@@ -266,12 +322,18 @@ export class ArcClient {
         return filterValidNames(rows.map((row: any[]) => row[0]));
       }
 
-      return ['default'];
+      return [];
     } catch (error) {
-      // If query fails, fallback to default database
-      if (axios.isAxiosError(error)) {
-        console.warn('Failed to get databases, using default:', error.message);
-        return ['default'];
+      // No failure is answered with a made-up database. The old blanket
+      // `return ['default']` put a database in the tree that might not exist,
+      // or that the token might not be able to read, with nothing anywhere
+      // saying why. Arc 26.09 and earlier refuse this listing for a token
+      // scoped to particular databases (newer Arc returns a filtered list
+      // instead), so a refusal is a normal state the caller can degrade from;
+      // an unreachable server or a server fault is reported as what it is.
+      const refusal = this.asAccessError(error);
+      if (refusal) {
+        throw refusal;
       }
       throw this.handleError(error);
     }
@@ -303,6 +365,16 @@ export class ArcClient {
       for (const point of data) {
         Object.keys(point.tags ?? {}).forEach(k => tagKeys.add(k));
         Object.keys(point.fields ?? {}).forEach(k => fieldKeys.add(k));
+      }
+
+      // The timestamp column is generated from point.timestamp and cannot be
+      // replaced by a user-provided tag or field. Arc treats the reserved name
+      // case-insensitively, so reject every casing before building columns.
+      const reserved = [...tagKeys, ...fieldKeys].find(k => k.toLowerCase() === 'time');
+      if (reserved !== undefined) {
+        throw new Error(
+          `Column "${reserved}" is reserved for timestamps and cannot be used as a tag or field`
+        );
       }
 
       const columns: Record<string, any[]> = {
@@ -344,8 +416,11 @@ export class ArcClient {
       const axiosError = error as AxiosError;
       const responseData = axiosError.response?.data as any;
 
-      // Build detailed error message
-      let message = responseData?.message || axiosError.message || 'Unknown error';
+      // Arc's own explanation. It sends it as `error` on most routes and
+      // `message` on a few; reading only `message` lost almost all of them.
+      const serverMessage = serverErrorMessage(responseData);
+      let message = serverMessage || axiosError.message || 'Unknown error';
+      const accessError = this.asAccessError(error);
 
       // Add more context for common errors
       if (axiosError.code === 'ECONNREFUSED') {
@@ -354,24 +429,28 @@ export class ArcClient {
         message = `Cannot resolve hostname: ${this.connection.host}`;
       } else if (axiosError.code === 'ETIMEDOUT') {
         message = `Connection timeout to ${this.connection.host}:${this.connection.port}`;
-      } else if (axiosError.response?.status === 401) {
-        message = 'Authentication failed - Invalid or missing token';
-      } else if (axiosError.response?.status === 403) {
-        // Arc returns 403 with an explanatory message for licence-gated
-        // features too, e.g. "RBAC requires an enterprise license...". The old
-        // flat message told users to check token permissions, which is
-        // actively misleading when the real problem is licensing -- so prefer
-        // whatever the server said.
-        const serverMessage = responseData?.error || responseData?.message;
-        message = serverMessage || 'Access forbidden - Check token permissions';
-      } else if (axiosError.response?.status === 404) {
+      } else if (accessError) {
+        // 401 and 403 are not one condition, and 403 is not even one
+        // condition by itself: Arc answers it for a token with no read
+        // permission, for a token whose grants do not cover the database
+        // asked for, for a licence-gated feature, and for its own permission
+        // store being unreadable — distinguishable only by message. The
+        // classifier reads them (utils/arcErrors.ts) and returns a sentence
+        // naming the fix, so no caller has to pattern-match here and a
+        // scoped token is never reported as a bad token.
+        message = accessError.message;
+      } else if (axiosError.response?.status === 404 && (!serverMessage || /^Cannot [A-Z]+ /.test(serverMessage))) {
+        // Arc's router answers an unknown route with "Cannot GET /path"; a
+        // handler's 404 ("Database 'x' not found") is kept as Arc wrote it.
         message = 'Endpoint not found - Check server URL';
       }
 
+      // The original AxiosError is deliberately not attached: its config
+      // carries the Authorization header, and any caller that logs this
+      // error would otherwise write the token to the Extension Host log.
       const err = new Error(message);
       (err as any).code = axiosError.code;
       (err as any).statusCode = axiosError.response?.status;
-      (err as any).originalError = axiosError;
 
       console.error('[ArcClient] Error details:', {
         code: axiosError.code,
@@ -390,4 +469,77 @@ export class ArcClient {
 
     return new Error('Unknown error occurred');
   }
+}
+
+/**
+ * Arc's own message from an error body. It uses `error` on most routes and
+ * `message` on a few, so both are read; a non-object body (an HTML error page
+ * from a proxy, say) yields undefined rather than a misleading string.
+ */
+function serverErrorMessage(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) {
+    return undefined;
+  }
+  const body = data as { error?: unknown; message?: unknown };
+  if (typeof body.error === 'string' && body.error !== '') {
+    return body.error;
+  }
+  if (typeof body.message === 'string' && body.message !== '') {
+    return body.message;
+  }
+  return undefined;
+}
+
+/** Arc's machine-readable reason for an error, when it sends one. */
+function serverErrorReason(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) {
+    return undefined;
+  }
+  const reason = (data as { reason?: unknown }).reason;
+  return typeof reason === 'string' && reason !== '' ? reason : undefined;
+}
+
+/**
+ * Measurement names from a `/api/v1/measurements` body. Arc answers
+ * `{ measurements: [{ database, measurement, ... }] }`; plain string entries
+ * and a `name` key are accepted too, for older or proxied responses.
+ * Returns undefined for a body it does not recognise.
+ */
+function measurementNames(data: unknown): string[] | undefined {
+  const list = Array.isArray(data)
+    ? data
+    : (typeof data === 'object' && data !== null && Array.isArray((data as { measurements?: unknown }).measurements)
+        ? (data as { measurements: unknown[] }).measurements
+        : undefined);
+  if (!list) {
+    return undefined;
+  }
+  return list.map(entry => {
+    if (typeof entry === 'string') {
+      return entry;
+    }
+    if (typeof entry === 'object' && entry !== null) {
+      const e = entry as { measurement?: unknown; name?: unknown };
+      return typeof e.measurement === 'string' ? e.measurement : e.name;
+    }
+    return undefined;
+  }) as string[];
+}
+
+/**
+ * What to log for a failed request: status, method, path and Arc's message.
+ * Never the error object itself, whose config carries the Authorization
+ * header (logging it writes the bearer token to the Extension Host log).
+ */
+function describeForLog(error: unknown): Record<string, unknown> | string {
+  if (axios.isAxiosError(error)) {
+    return {
+      code: error.code,
+      status: error.response?.status,
+      method: error.config?.method,
+      url: error.config?.url,
+      message: serverErrorMessage(error.response?.data) ?? error.message
+    };
+  }
+  return error instanceof Error ? error.message : String(error);
 }

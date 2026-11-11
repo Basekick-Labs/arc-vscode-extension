@@ -2,7 +2,10 @@ import { ArcNotebook, ArcNotebookCell } from '../types/notebook';
 
 /**
  * Merge a sibling panel's saved notebook into this panel without discarding
- * edits that have not yet been sent to the host.
+ * edits relative to the base that actually produced them. On conflicts local wins.
+ *
+ * Must stay closure-free: this compiled function is also embedded in the
+ * webview. Keep helpers inside it; do not add runtime imports or captures.
  */
 export function mergeSyncedNotebook(
   base: ArcNotebook,
@@ -46,7 +49,8 @@ export function mergeSyncedNotebook(
       value,
       writable: true
     });
-    const keys = new Set([...Object.keys(saved), ...Object.keys(localRecord), ...Object.keys(incomingRecord)]);
+    // Preserve local row order (especially renames); append incoming-only keys.
+    const keys = new Set([...Object.keys(localRecord), ...Object.keys(incomingRecord), ...Object.keys(saved)]);
 
     for (const key of keys) {
       const savedHas = Object.prototype.hasOwnProperty.call(saved, key);
@@ -114,4 +118,15 @@ export function mergeSyncedNotebook(
   }
 
   return merged;
+}
+
+/** Closure-free display conversion for arbitrary JSON values from a notebook. */
+export function notebookValueText(value: unknown): string {
+  if (value === null || value === undefined) { return ''; }
+  try { return String(value); }
+  catch {
+    // A JSON object can shadow toString/valueOf with non-callable values.
+    try { return JSON.stringify(value) ?? ''; }
+    catch { return '[Unsupported value]'; }
+  }
 }

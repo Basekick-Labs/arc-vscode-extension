@@ -2,6 +2,28 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Unsent notebook drafts survive view rebuilds.** Structural and external edits wait for a frozen draft handoff before replacing a panel. Pending edits and unfinished variable rows remain in a visible recovery copy that can be saved separately, including when the document becomes unreadable. Recreated views obtain fresh canonical contents before editing or running queries; old cell indexes are never used to restore a draft.
+- **Notebook split-view saves preserve unrelated edits.** Each panel saves against its acknowledged base, and the host merges and serializes writes before synchronizing every panel. Typing, cursor focus, incomplete variable rows, and query results survive non-structural synchronization. Conflicting edits to the same field keep the saving panel's local value; stale structural saves are rejected instead of overwriting newer contents.
+- **No more made-up `default` database.** `getDatabases()` answered *any* failure by returning `['default']`, so a refused listing, an unreachable server or a server fault all put a database in the explorer that might not exist or might not be readable, with nothing saying why. It now never invents one: a refusal, a network problem or a server error is reported as what it is.
+- **Database-scoped tokens on Arc 26.09 and earlier.** Those servers refuse to list databases for a token restricted to particular ones (Arc after 26.09.4 returns only the databases the token can read, which the explorer shows as is, including "No databases visible to this token" when the list is empty). On a refusal the explorer uses the connection's database when one is set, and otherwise shows "Token is scoped — click to set this connection's database".
+- **Arc's 403s are no longer one message, and only read refusals are reworded.** A token with no read permission, one whose grants do not cover the database asked for, one whose role does not cover a measurement, a licence-gated feature and Arc's permission store being down each produce a sentence naming the fix. A measurement-level refusal names the measurement, not the whole database, and only the listing refusal suggests setting the connection's database. Every other refusal (admin required, write required, deletion disabled on the server) is shown exactly as Arc reports it.
+- **Arc's error messages reach the user.** Errors were read from `message`, while Arc sends its explanation as `error`, so most failures showed only "Request failed with status code 400". Arc's own text is now shown, and a 404 from a handler ("Database 'x' not found") is no longer reported as a missing endpoint.
+- **The token no longer reaches the Extension Host log.** Failed health checks and measurement listings logged the raw HTTP error, whose request config carries the `Authorization` header, and every error kept that object attached. Logs now carry the status, path and Arc's message only.
+- **A refusal is no longer retried against a second endpoint.** `getMeasurements()` fell back from `SHOW TABLES` to `/api/v1/measurements` on any failure; that endpoint applies the same per-database check, so the retry only doubled the requests and the audit entries. The fallback still runs for other failures, now reads Arc's actual response shape (it produced no names before), and asks for the same `default` database that `SHOW TABLES` lists.
+- **SQL completions survive a scoped token.** The completion cache was emptied whenever `SHOW DATABASES` failed; it now seeds from the connection's database.
+- **Creating a token without read no longer breaks the connection.** The new token always replaced the connection's token; one without `read` (or `admin`) left the connection unable to browse or query. Such a token is now shown and copied but not saved, and the message says which token the connection uses.
+- **Tests are not packaged** in the `.vsix` (`out/test/**` is excluded).
+
+### Added
+- **A database per connection.** Connect and Edit Connection ask for an optional database, and **Arc: Set Connection Database** (command palette, a connection's context menu, or clicking the "Token is scoped" node) sets or clears it. The explorer, completions and schema views use it; queries you write still name their database in the SQL.
+- **Token permissions are chosen, not assumed.** Creating a token asks which of `read`, `write`, `delete` and `admin` it should carry, defaulting to Arc's own `read,write`. The created-token message lists them and notes that RBAC grants narrow them further if the token belongs to a team.
+- **First unit tests** (`npm test`, `node --test` over the compiled output), using the bodies Arc actually sends: the refusal classifier, and the HTTP client's handling of refusals, server faults, network errors and 404s on the listings and other calls.
+### Added
+- **Add a connection from the Connections view.** A **+** in the view's title bar runs the same flow as **Arc: Connect to Server**, like the + in Server Tokens. Previously a connection could only be added from the Explorer's plug icon, the status bar or the command palette.
+
 ## [0.3.6] - 2026-04-09
 
 ### Fixed

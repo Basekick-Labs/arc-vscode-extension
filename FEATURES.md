@@ -31,7 +31,7 @@ The Arc VS Code Extension is a comprehensive development tool for Arc Database t
 
 ### Connecting to Arc Server
 
-**Command:** `Arc: Connect` or click the status bar
+**Command:** `Arc: Connect`, click the status bar, or the **+** in the Connections view
 
 1. Click the **Arc: Not Connected** status bar item (bottom left)
 2. Enter connection details:
@@ -55,7 +55,7 @@ Token: SUrawdObUZ4ocyvFd46Y0hAeIIdr6KrikK7TEX-tXyE
 The extension supports multiple saved connections.
 
 **To add a new connection:**
-- Run `Arc: Connect` command
+- Click **+** in the **Arc Connections** view title, or run the `Arc: Connect` command
 - Fill in the connection details
 - The connection is automatically saved
 
@@ -68,6 +68,11 @@ The extension supports multiple saved connections.
 - Right-click the connection in **Arc Connections** view
 - Select **Edit Connection**
 - Update the details
+
+**To set a connection's database:**
+- Right-click the connection and select **Set Connection Database**, or run **Arc: Set Connection Database** for the active connection
+- Enter a database name, or leave it empty to clear it
+- Needed for a token restricted to particular databases on Arc 26.09 and earlier, which will not list databases for it; the explorer, completions and schema views then use this one (queries you write name their database in the SQL)
 
 **To delete a connection:**
 - Right-click the connection
@@ -1290,6 +1295,7 @@ All commands available via Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 - `Arc: Disconnect`
 - `Arc: Activate Connection`
 - `Arc: Edit Connection`
+- `Arc: Set Connection Database`
 - `Arc: Delete Connection`
 
 **Queries:**
@@ -1345,6 +1351,7 @@ All commands available via Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 **Arc Connections**
 - Saved connections list
+- **+** in the title bar adds a connection
 - Click to activate
 
 **Arc Server Tokens**

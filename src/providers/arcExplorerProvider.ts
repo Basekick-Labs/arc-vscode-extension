@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../utils/connectionManager';
 import { ArcDatabase, ArcMeasurement } from '../types';
+import { ArcAccessError, isScopedRefusal } from '../utils/arcErrors';
 
 export class ArcExplorerProvider implements vscode.TreeDataProvider<ArcTreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<ArcTreeItem | undefined | null | void> = new vscode.EventEmitter<ArcTreeItem | undefined | null | void>();
@@ -32,8 +33,44 @@ export class ArcExplorerProvider implements vscode.TreeDataProvider<ArcTreeItem>
 
     try {
       if (!element) {
-        // Root level - show databases
-        const databases = await client.getDatabases();
+        // Root level - show databases.
+        //
+        // Arc restricts reads per database. Arc 26.09 and earlier refuse to
+        // list databases for a token scoped to particular ones (newer Arc
+        // returns only the ones it can read). That refusal is a normal state
+        // for a tenant token, not a connection failure, and the tree can
+        // still be useful: if the connection names a database, show that one
+        // and let the user browse it.
+        let databases: string[];
+        try {
+          databases = await client.getDatabases();
+        } catch (error) {
+          if (!isScopedRefusal(error)) {
+            throw error;
+          }
+          const active = this.connectionManager.getActiveDatabase();
+          if (!active) {
+            // Nothing to fall back to: say what is wrong and what fixes it,
+            // rather than an empty tree or a raw 403.
+            const item = new ArcTreeItem(
+              'Token is scoped — click to set this connection\'s database',
+              vscode.TreeItemCollapsibleState.None,
+              'scoped',
+              { message: error.message }
+            );
+            item.command = {
+              command: 'arc.setConnectionDatabase',
+              title: 'Set Connection Database'
+            };
+            return [item];
+          }
+          databases = [active];
+        }
+        if (databases.length === 0) {
+          // Newer Arc answers a scoped token with only the databases it can
+          // read, which is an empty list when none of them holds data yet.
+          return [new ArcTreeItem('No databases visible to this token', vscode.TreeItemCollapsibleState.None, 'info')];
+        }
         return databases.map(db => new ArcTreeItem(
           db,
           vscode.TreeItemCollapsibleState.Collapsed,
@@ -43,7 +80,22 @@ export class ArcExplorerProvider implements vscode.TreeDataProvider<ArcTreeItem>
       } else if (element.contextValue === 'database') {
         // Database level - show measurements
         const database = element.metadata?.database;
-        const measurements = await client.getMeasurements(database);
+        let measurements: ArcMeasurement[] | { name: string }[];
+        try {
+          measurements = await client.getMeasurements(database);
+        } catch (error) {
+          if (!isScopedRefusal(error)) {
+            throw error;
+          }
+          // The token reads some databases but not this one. Say so on the
+          // node the user expanded, so the rest of the tree stays usable.
+          return [new ArcTreeItem(
+            `No read access to '${database}' with this token`,
+            vscode.TreeItemCollapsibleState.None,
+            'scoped',
+            { message: error.message }
+          )];
+        }
 
         if (measurements.length === 0) {
           return [new ArcTreeItem('No measurements', vscode.TreeItemCollapsibleState.None, 'info')];
@@ -58,7 +110,13 @@ export class ArcExplorerProvider implements vscode.TreeDataProvider<ArcTreeItem>
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      vscode.window.showErrorMessage(`Failed to load Arc data: ${message}`);
+      // An ArcAccessError already carries a sentence naming the fix; wrapping
+      // it in "Failed to load Arc data" only buries that.
+      if (error instanceof ArcAccessError) {
+        vscode.window.showErrorMessage(message);
+      } else {
+        vscode.window.showErrorMessage(`Failed to load Arc data: ${message}`);
+      }
       return [new ArcTreeItem(`Error: ${message}`, vscode.TreeItemCollapsibleState.None, 'error')];
     }
 
@@ -85,6 +143,10 @@ export class ArcTreeItem extends vscode.TreeItem {
         return `Database: ${this.label}`;
       case 'measurement':
         return `Measurement: ${this.label}`;
+      case 'scoped':
+        // The full explanation, so hovering the node says what to change
+        // without needing the toast that is no longer shown for this case.
+        return this.metadata?.message ?? this.label;
       default:
         return this.label;
     }
@@ -98,6 +160,9 @@ export class ArcTreeItem extends vscode.TreeItem {
         return new vscode.ThemeIcon('table');
       case 'error':
         return new vscode.ThemeIcon('error');
+      case 'scoped':
+        // A lock, not an error: the token is working as configured.
+        return new vscode.ThemeIcon('lock');
       case 'info':
         return new vscode.ThemeIcon('info');
       default:

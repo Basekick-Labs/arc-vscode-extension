@@ -14,7 +14,7 @@
 - **Data ingestion** - CSV import with delimiter/header detection and batched writes, plus a generator for CPU, memory, network, IoT and custom test data. Both use MessagePack columnar format.
 - **Alerts** - run a query on an interval and get a desktop notification when the result crosses a threshold. Five conditions, alert history, enable/disable without deleting.
 - **Query management** - automatic history and saved queries, with execution time, row counts and errors.
-- **Tokens** - create, rotate, verify and delete Arc server tokens from the sidebar.
+- **Tokens** - create, rotate, verify and delete Arc server tokens from the sidebar. Creating one asks which permissions it should carry (Arc's default is read and write); `read` is what the extension needs to browse databases and run queries.
 - **Themes** - adapts to Light, Dark and High Contrast automatically, charts included.
 
 See **[FEATURES.md](FEATURES.md)** for the full guide.
@@ -25,7 +25,9 @@ See **[FEATURES.md](FEATURES.md)** for the full guide.
 2. Click **"Arc: Not Connected"** in the status bar and enter your host, port, protocol and token.
 3. `Ctrl+Shift+P` → **Arc: New Query**, write SQL, and press `Ctrl+Enter` / `Cmd+Enter`.
 
-Requires VS Code 1.85+, a reachable Arc instance, and an Arc authentication token.
+Requires VS Code 1.85+, a reachable Arc instance, and an Arc authentication token with `read` permission.
+
+Arc can restrict a token's reads to particular databases. Newer Arc lists only the databases such a token can read. Arc 26.09 and earlier refuse to list them at all, so set a database on the connection — when connecting, with **Edit Connection**, or with **Arc: Set Connection Database** — and the explorer, completions and schema views use that one. Queries you write name their database in the SQL (`SELECT ... FROM db.measurement`).
 
 ## Settings
 
@@ -92,6 +94,12 @@ Turn it off with `arc.telemetry.enabled`, or disable telemetry across VS Code wi
 ## Troubleshooting
 
 **Cannot connect** - check Arc is up (`curl http://localhost:8000/health`), confirm host and port, then run **Arc: Verify Token**.
+
+**"Token is scoped — click to set this connection's database"** - the token can read, but this Arc server (26.09 or earlier) will not list every database for it. Click the node, or run **Arc: Set Connection Database**, and enter a database the token is granted. This is not a failure; it is what a database-scoped token looks like.
+
+**"This token does not carry the read permission Arc requires"** - a different problem from the above, and naming a database will not fix it: create or use a token that includes `read`.
+
+**Other refusals** (admin required, write required, deletion disabled on the server) are shown exactly as Arc reports them.
 
 **Query timeout** - add a time filter (`WHERE time > now() - INTERVAL 1 HOUR`) and a `LIMIT`, or raise `arc.queryTimeout`.
 
