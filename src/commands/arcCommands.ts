@@ -6,7 +6,7 @@ import { ArcTokensProvider } from '../providers/arcTokensProvider';
 import { ArcQueriesProvider } from '../providers/arcQueriesProvider';
 import { QueryResultsView } from '../views/queryResultsView';
 import { QueryStorage } from '../utils/queryStorage';
-import { ArcConnection } from '../types';
+import { ArcConnection, ArcTokenPermission } from '../types';
 import { ArcClient } from '../api/arcClient';
 import { CSVImporter } from '../utils/csvImporter';
 import { DataGenerator } from '../utils/dataGenerator';
@@ -102,6 +102,11 @@ export class ArcCommands {
         return;
       }
 
+      const database = await this.promptConnectionDatabase(undefined);
+      if (database === undefined) {
+        return;
+      }
+
       // Ask for token
       const token = await vscode.window.showInputBox({
         prompt: 'Authentication token (optional - press Enter to skip)',
@@ -114,7 +119,8 @@ export class ArcCommands {
         name,
         host,
         port,
-        protocol: protocol as 'http' | 'https'
+        protocol: protocol as 'http' | 'https',
+        ...(database ? { database } : {})
       };
 
       // Save connection
@@ -185,6 +191,65 @@ export class ArcCommands {
   }
 
   /**
+   * Ask for a connection's database. Returns the name, '' for "none", or
+   * undefined when the user cancelled.
+   *
+   * Optional for most tokens. It matters for a token restricted to particular
+   * databases on Arc 26.09 and earlier, which refuse to list databases for
+   * it: the explorer, completions and queries then use this one.
+   */
+  private async promptConnectionDatabase(current: string | undefined): Promise<string | undefined> {
+    const value = await vscode.window.showInputBox({
+      prompt: 'Database (optional). Needed when the token can only read particular databases',
+      value: current ?? '',
+      placeHolder: 'Leave empty to browse every database the token can list',
+      validateInput: input => {
+        const name = input.trim();
+        if (name === '') {
+          return undefined;
+        }
+        // Arc's rule for database names: a letter first, then letters,
+        // digits, underscores or hyphens, at most 64 characters.
+        return /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
+          ? undefined
+          : 'Use 1–64 characters: start with a letter, then letters, numbers, underscores or hyphens.';
+      }
+    });
+    return value === undefined ? undefined : value.trim();
+  }
+
+  /**
+   * Set the database a connection uses: from a connection's context menu, the
+   * explorer's "Token is scoped" node, or the command palette (active
+   * connection).
+   */
+  async setConnectionDatabase(connection?: ArcConnection): Promise<void> {
+    try {
+      const target = connection ?? this.connectionManager.getActiveConnection();
+      if (!target) {
+        vscode.window.showWarningMessage('No connection selected. Connect to an Arc server first.');
+        return;
+      }
+      const stored = this.connectionManager.getConnection(target.id) ?? target;
+      const database = await this.promptConnectionDatabase(stored.database);
+      if (database === undefined) {
+        return;
+      }
+      await this.connectionManager.setConnectionDatabase(target.id, database || undefined);
+      vscode.window.showInformationMessage(
+        database
+          ? `Connection "${target.name}" now uses database "${database}".`
+          : `Connection "${target.name}" no longer sets a database.`
+      );
+      this.connectionsProvider.refresh();
+      this.explorerProvider.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      vscode.window.showErrorMessage(`Failed to set the connection's database: ${message}`);
+    }
+  }
+
+  /**
    * Edit an existing connection
    */
   async editConnection(connection: ArcConnection): Promise<void> {
@@ -234,6 +299,11 @@ export class ArcCommands {
         return;
       }
 
+      const database = await this.promptConnectionDatabase(connection.database);
+      if (database === undefined) {
+        return;
+      }
+
       // Update connection
       const updatedConnection: ArcConnection = {
         ...connection,
@@ -244,11 +314,13 @@ export class ArcCommands {
       };
 
       await this.connectionManager.addConnection(updatedConnection);
+      await this.connectionManager.setConnectionDatabase(updatedConnection.id, database || undefined);
 
       vscode.window.showInformationMessage(`Updated connection: ${name}`);
 
       // Refresh views
       this.connectionsProvider.refresh();
+      this.explorerProvider.refresh();
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -372,6 +444,68 @@ export class ArcCommands {
   }
 
   /**
+   * Ask which coarse permissions a new token should carry.
+   *
+   * Arc defaults to `read,write` when a create request omits them, which the
+   * extension used to take silently. That default is worth surfacing now that
+   * Arc enforces read restrictions: `read` is what the extension needs to
+   * browse databases and run queries at all, so a token created without it
+   * cannot be used here — and an operator who wants a browse-only token had
+   * no way to ask for one.
+   *
+   * Returns undefined if the user cancelled, so the caller can abort rather
+   * than create a token nobody asked for.
+   */
+  private async pickTokenPermissions(): Promise<ArcTokenPermission[] | undefined> {
+    const choices: Array<vscode.QuickPickItem & { value: ArcTokenPermission }> = [
+      { label: 'read', description: 'Query data and browse databases — required by this extension', value: 'read', picked: true },
+      { label: 'write', description: 'Ingest data', value: 'write', picked: true },
+      { label: 'delete', description: 'Delete data and databases', value: 'delete' },
+      { label: 'admin', description: 'Everything, including tokens and RBAC. Also bypasses per-database read restrictions', value: 'admin' }
+    ];
+
+    const picked = await vscode.window.showQuickPick(choices, {
+      canPickMany: true,
+      title: 'Token permissions',
+      placeHolder: 'read and write are Arc\'s default; read is required for this extension'
+    });
+
+    if (!picked) {
+      return undefined;
+    }
+    if (picked.length === 0) {
+      // Arc reads an empty array as "no coarse permissions" (an RBAC-only
+      // token). Sending that by accident, from someone clearing the list to
+      // mean "defaults", would create a token that cannot read anything until
+      // grants exist — so treat it as a cancellation and say why.
+      vscode.window.showWarningMessage(
+        'No permissions selected, so no token was created. A token needs at least "read" to be usable from this extension.'
+      );
+      return undefined;
+    }
+    if (!picked.some(p => p.value === 'read' || p.value === 'admin')) {
+      vscode.window.showWarningMessage(
+        'This token has no read permission, so it cannot query or browse databases from this extension. The connection will keep its current token.'
+      );
+    }
+    return picked.map(p => p.value);
+  }
+
+  /**
+   * What a freshly created token can do, for the message that shows it. Arc
+   * restricts reads per database for a token that belongs to a team, so the
+   * permission list is a ceiling, not a guarantee — say that rather than
+   * implying the token can read everything.
+   */
+  private describeTokenPermissions(permissions: ArcTokenPermission[]): string {
+    const list = permissions.join(', ');
+    if (permissions.includes('admin')) {
+      return `Permissions: ${list}.`;
+    }
+    return `Permissions: ${list}. If the token is added to an RBAC team on the server, its grants narrow this further — it will only see the databases it is granted.`;
+  }
+
+  /**
    * Create a new authentication token
    */
   async createToken(): Promise<void> {
@@ -393,17 +527,32 @@ export class ArcCommands {
         placeHolder: 'VS Code Extension Token'
       });
 
-      const response = await client.createToken({ name, description });
+      const permissions = await this.pickTokenPermissions();
+      if (!permissions) {
+        return;
+      }
 
-      // Save token
+      const response = await client.createToken({ name, description, permissions });
+
+      // The new token becomes the connection's token, as it always has -- but
+      // only if the extension can use it. One without read (or admin) cannot
+      // browse or query, so saving it would break the connection it was
+      // created from; keep the current token instead and say so.
       const activeConnection = this.connectionManager.getActiveConnection();
+      const usable = permissions.includes('read') || permissions.includes('admin');
+      let savedNote = '';
       if (activeConnection) {
-        await this.connectionManager.saveToken(activeConnection.id, response.token);
+        if (usable) {
+          await this.connectionManager.saveToken(activeConnection.id, response.token);
+          savedNote = ` It is now the token for "${activeConnection.name}", replacing the previous one.`;
+        } else {
+          savedNote = ` "${activeConnection.name}" keeps its current token, because this one has no read permission.`;
+        }
       }
 
       // Show token to user (one time only)
       const action = await vscode.window.showInformationMessage(
-        'Token created successfully. Copy it now - it won\'t be shown again.',
+        `Token created successfully. Copy it now - it won't be shown again.${savedNote} ${this.describeTokenPermissions(permissions)}`,
         'Copy Token'
       );
 
@@ -706,11 +855,16 @@ export class ArcCommands {
         placeHolder: 'Token for API access'
       });
 
-      const response = await client.createToken({ name, description });
+      const permissions = await this.pickTokenPermissions();
+      if (!permissions) {
+        return;
+      }
+
+      const response = await client.createToken({ name, description, permissions });
 
       // Show token to user (one time only)
       const action = await vscode.window.showInformationMessage(
-        `Token "${name}" created successfully. Copy it now - it won\'t be shown again.`,
+        `Token "${name}" created successfully. Copy it now - it won't be shown again. ${this.describeTokenPermissions(permissions)}`,
         'Copy Token'
       );
 

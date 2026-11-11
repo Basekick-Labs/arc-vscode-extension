@@ -47,6 +47,11 @@
         "icon": "$(plug)"
       },
       {
+        "command": "arc.addConnection",
+        "title": "Arc: Add Connection",
+        "icon": "$(add)"
+      },
+      {
         "command": "arc.disconnect",
         "title": "Arc: Disconnect",
         "icon": "$(debug-disconnect)"
@@ -100,6 +105,11 @@
         "command": "arc.editConnection",
         "title": "Arc: Edit Connection",
         "icon": "$(edit)"
+      },
+      {
+        "command": "arc.setConnectionDatabase",
+        "title": "Arc: Set Connection Database",
+        "icon": "$(database)"
       },
       {
         "command": "arc.deleteConnection",
@@ -349,7 +359,18 @@
       }
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "arc.addConnection",
+          "when": "false"
+        }
+      ],
       "view/title": [
+        {
+          "command": "arc.addConnection",
+          "when": "view == arcConnections",
+          "group": "navigation@1"
+        },
         {
           "command": "arc.connect",
           "when": "view == arcExplorer",
@@ -409,6 +430,11 @@
         },
         {
           "command": "arc.editConnection",
+          "when": "view == arcConnections && viewItem == connection",
+          "group": "connection@1"
+        },
+        {
+          "command": "arc.setConnectionDatabase",
           "when": "view == arcConnections && viewItem == connection",
           "group": "connection@1"
         },
@@ -521,13 +547,14 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "npm run compile && node --test out/test/"
   },
   "devDependencies": {
     "@types/node": "^20.x",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
+    "axios-mock-adapter": "^2.1.0",
     "eslint": "^8.56.0",
     "typescript": "^5.3.3"
   },

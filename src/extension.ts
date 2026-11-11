@@ -135,15 +135,33 @@ export function activate(context: vscode.ExtensionContext) {
   // Register commands
   const commandRegistrations = [
     vscode.commands.registerCommand('arc.connect', () => connectWithUpdate()),
+    // The Connections view's + button: the same flow as "Arc: Connect to
+    // Server", with the add icon the other views use for creating an item.
+    vscode.commands.registerCommand('arc.addConnection', () => connectWithUpdate()),
     vscode.commands.registerCommand('arc.disconnect', () => disconnectWithUpdate()),
     vscode.commands.registerCommand('arc.activateConnection', (treeItem) => {
       // Extract connection from tree item
       const connection = treeItem?.connection || treeItem;
       activateConnectionWithUpdate(connection);
     }),
-    vscode.commands.registerCommand('arc.editConnection', (treeItem) => {
+    vscode.commands.registerCommand('arc.editConnection', async (treeItem) => {
       const connection = treeItem?.connection || treeItem;
-      commands.editConnection(connection);
+      await commands.editConnection(connection);
+      // The edit may change the connection's database.
+      sqlCompletionProvider.clearCache();
+      updateStatusBar();
+    }),
+    vscode.commands.registerCommand('arc.setConnectionDatabase', async (treeItem) => {
+      // From a connection's context menu the argument carries the connection;
+      // from the palette or the explorer's "Token is scoped" node there is
+      // none, and the active connection is meant.
+      const candidate = treeItem?.connection ?? treeItem;
+      const connection = candidate && typeof candidate.id === 'string' && typeof candidate.host === 'string'
+        ? candidate
+        : undefined;
+      await commands.setConnectionDatabase(connection);
+      sqlCompletionProvider.clearCache();
+      updateStatusBar();
     }),
     vscode.commands.registerCommand('arc.deleteConnection', (treeItem) => {
       const connection = treeItem?.connection || treeItem;
