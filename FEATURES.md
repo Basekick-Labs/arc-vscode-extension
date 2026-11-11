@@ -31,7 +31,7 @@ The Arc VS Code Extension is a comprehensive development tool for Arc Database t
 
 ### Connecting to Arc Server
 
-**Command:** `Arc: Connect` or click the status bar
+**Command:** `Arc: Connect`, click the status bar, or the **+** in the Connections view
 
 1. Click the **Arc: Not Connected** status bar item (bottom left)
 2. Enter connection details:
@@ -55,7 +55,7 @@ Token: SUrawdObUZ4ocyvFd46Y0hAeIIdr6KrikK7TEX-tXyE
 The extension supports multiple saved connections.
 
 **To add a new connection:**
-- Run `Arc: Connect` command
+- Click **+** in the **Arc Connections** view title, or run the `Arc: Connect` command
 - Fill in the connection details
 - The connection is automatically saved
 
@@ -1351,6 +1351,7 @@ All commands available via Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 **Arc Connections**
 - Saved connections list
+- **+** in the title bar adds a connection
 - Click to activate
 
 **Arc Server Tokens**
