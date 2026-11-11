@@ -47,6 +47,11 @@
         "icon": "$(plug)"
       },
       {
+        "command": "arc.addConnection",
+        "title": "Arc: Add Connection",
+        "icon": "$(add)"
+      },
+      {
         "command": "arc.disconnect",
         "title": "Arc: Disconnect",
         "icon": "$(debug-disconnect)"
@@ -349,7 +354,18 @@
       }
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "arc.addConnection",
+          "when": "false"
+        }
+      ],
       "view/title": [
+        {
+          "command": "arc.addConnection",
+          "when": "view == arcConnections",
+          "group": "navigation@1"
+        },
         {
           "command": "arc.connect",
           "when": "view == arcExplorer",
