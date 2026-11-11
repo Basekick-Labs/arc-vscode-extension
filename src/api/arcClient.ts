@@ -306,9 +306,13 @@ export class ArcClient {
       }
 
       // The timestamp column is generated from point.timestamp and cannot be
-      // replaced by a user-provided tag. Field collisions are rejected below.
-      if (tagKeys.has('time')) {
-        throw new Error('Column "time" is reserved for timestamps and cannot be used as a tag');
+      // replaced by a user-provided tag or field. Arc treats the reserved name
+      // case-insensitively, so reject every casing before building columns.
+      const reserved = [...tagKeys, ...fieldKeys].find(k => k.toLowerCase() === 'time');
+      if (reserved !== undefined) {
+        throw new Error(
+          `Column "${reserved}" is reserved for timestamps and cannot be used as a tag or field`
+        );
       }
 
       const columns: Record<string, any[]> = {
