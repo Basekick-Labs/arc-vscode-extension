@@ -2,6 +2,11 @@
 
 All notable changes to the "Arc Database Manager" extension will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Add a connection from the Connections view.** A **+** in the view's title bar runs the same flow as **Arc: Connect to Server**, like the + in Server Tokens. Previously a connection could only be added from the Explorer's plug icon, the status bar or the command palette.
+
 ## [0.3.6] - 2026-04-09
 
 ### Fixed
