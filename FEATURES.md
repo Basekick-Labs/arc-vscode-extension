@@ -69,6 +69,11 @@ The extension supports multiple saved connections.
 - Select **Edit Connection**
 - Update the details
 
+**To set a connection's database:**
+- Right-click the connection and select **Set Connection Database**, or run **Arc: Set Connection Database** for the active connection
+- Enter a database name, or leave it empty to clear it
+- Needed for a token restricted to particular databases on Arc 26.09 and earlier, which will not list databases for it; the explorer, completions and schema views then use this one (queries you write name their database in the SQL)
+
 **To delete a connection:**
 - Right-click the connection
 - Select **Delete Connection**
@@ -1290,6 +1295,7 @@ All commands available via Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 - `Arc: Disconnect`
 - `Arc: Activate Connection`
 - `Arc: Edit Connection`
+- `Arc: Set Connection Database`
 - `Arc: Delete Connection`
 
 **Queries:**

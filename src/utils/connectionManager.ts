@@ -190,6 +190,43 @@ export class ConnectionManager {
   }
 
   /**
+   * Set (or, with undefined, clear) the database a saved connection uses, and
+   * apply it at once if that connection is the active one. A token scoped to
+   * particular databases on Arc 26.09 and earlier cannot list databases, so
+   * this is how the explorer, completions and schema helpers learn which one
+   * to use.
+   */
+  async setConnectionDatabase(connectionId: string, database: string | undefined): Promise<ArcConnection> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      throw new Error(`Connection ${connectionId} not found`);
+    }
+    const updated: ArcConnection = { ...connection };
+    if (database) {
+      updated.database = database;
+    } else {
+      delete updated.database;
+    }
+    this.connections.set(connectionId, updated);
+    await this.saveConnections();
+
+    // Only the database changes on the live connection: the active client was
+    // built for the connection as it was activated, so its host and port stay
+    // those until the next activation.
+    if (this.activeConnection?.id === connectionId) {
+      const active: ArcConnection = { ...this.activeConnection };
+      if (updated.database) {
+        active.database = updated.database;
+      } else {
+        delete active.database;
+      }
+      this.activeConnection = active;
+      this.activeDatabase = active.database;
+    }
+    return updated;
+  }
+
+  /**
    * Disconnect (clear active connection)
    */
   disconnect(): void {
