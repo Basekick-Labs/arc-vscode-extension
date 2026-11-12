@@ -121,7 +121,7 @@ Results appear in a dedicated webview panel with:
 **Export Results:**
 1. Click **Export CSV** or **Export JSON** to write every row of the result, not only the 1000 rows in the table, or **Copy as Markdown** to copy the rows shown
 2. Select save location
-3. File is saved with formatted data. Above 1000 rows a progress notification shows the rows written and can cancel the export. A cancelled or failed export removes a file it created and leaves a file it was replacing empty (a symlink, FIFO or device is never removed)
+3. File is saved with formatted data. Above 1000 rows a progress notification shows the rows written and can cancel the export. A cancelled or failed export removes a file it created and leaves a file it was replacing empty (a symlink, FIFO or device is never removed; a file created through a dangling symlink is left empty)
 
 **Export row limit:**
 - `arc.export.maxRows` (default `0` = every row) caps the rows written; `1000` exports the rows the table shows, the same rows older versions exported

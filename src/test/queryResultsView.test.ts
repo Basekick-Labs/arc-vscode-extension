@@ -339,6 +339,28 @@ test('a page that fails to build after a query leaves a small previous table exp
   assert.equal(csvRows(file), 5);
 });
 
+test('a second export whose dialog closes while the first is writing is refused', async () => {
+  resultsView.show(result(5), 'SELECT 1');
+  const answers: Array<(value: any) => void> = [];
+  state.save = () => new Promise(resolve => { answers.push(resolve); });
+  let release!: () => void;
+  state.fsWriteGate = new Promise<void>(resolve => { release = resolve; });
+  // Two clicks open two save dialogs before either export writes.
+  state.receiver!({ command: 'exportCSV', generation: generation() });
+  state.receiver!({ command: 'exportJSON', generation: generation() });
+  await settle();
+  assert.equal(answers.length, 2);
+  answers[0]({ scheme: 'vscode-remote', fsPath: '/remote/a.csv', path: '/remote/a.csv' });
+  while (!current().exporting) { await tick(); }
+  answers[1]({ scheme: 'vscode-remote', fsPath: '/remote/b.json', path: '/remote/b.json' });
+  for (let i = 0; i < 20; i++) { await tick(); }
+  assert.deepEqual(state.info, ['An export is already running.']);
+  release();
+  await settle();
+  assert.deepEqual(state.fsWrites.map((write: any) => write.uri.fsPath), ['/remote/a.csv']);
+  assert.deepEqual(state.info, ['An export is already running.', 'Exported 5 rows to /remote/a.csv']);
+});
+
 test('a click while an export is writing is refused', async () => {
   resultsView.show(result(5), 'SELECT 1');
   let release!: () => void;

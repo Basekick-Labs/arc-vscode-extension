@@ -253,11 +253,11 @@ test('cancel through a symlink to an existing file keeps the link and empties th
   fs.rmSync(dir, { recursive: true }); fs.rmSync(other, { recursive: true });
 });
 
-test('cancel through a dangling symlink removes the file the export created, not the link', { skip: !posix }, async () => {
+test('cancel through a dangling symlink empties the file created at its target and keeps the link', { skip: !posix }, async () => {
   const dir = tmp(), real = path.join(dir, 'created.csv'), link = path.join(dir, 'link.csv');
   fs.symlinkSync(real, link);
   assert.equal(await cancelPartWay(link), false);
-  assert.equal(fs.existsSync(real), false, 'no partial file left at the target');
+  assert.equal(fs.statSync(real).size, 0, 'no partial data left at the target');
   assert.ok(fs.lstatSync(link).isSymbolicLink(), 'the link is not removed');
   fs.rmSync(dir, { recursive: true });
 });
@@ -393,5 +393,33 @@ test('a control that reports cancellation synchronously does not crash the drain
   }
   assert.equal(await writeChunksToFile(file, chunks(), ctl), false);
   assert.equal(fs.existsSync(file), false);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('a symlink planted between the check and the open is never followed into a removal', { skip: !posix }, async () => {
+  const dir = tmp(), other = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-export-other-'));
+  const file = path.join(dir, 'new.csv'), precious = path.join(other, 'precious.csv');
+  fs.writeFileSync(precious, 'not ours');
+  let planted = false;
+  await withFsPromises({
+    open: original => async (p: string, flags: string) => {
+      if (!planted) { planted = true; fs.symlinkSync(precious, file); }
+      return original(p, flags);
+    }
+  }, () => cancelPartWay(file));
+  assert.ok(planted);
+  assert.ok(fs.existsSync(precious), 'the other file survives');
+  assert.ok(fs.lstatSync(file).isSymbolicLink());
+  fs.rmSync(dir, { recursive: true }); fs.rmSync(other, { recursive: true });
+});
+
+test('a file replaced during the export is left alone on cancel', async () => {
+  const dir = tmp(), file = path.join(dir, 'out.csv'), replacement = path.join(dir, 'replacement.csv');
+  fs.writeFileSync(replacement, 'saved by someone else');
+  let progressed = 0, cancelled = false;
+  const ctl: ExportControl = { isCancelled: () => cancelled, onCancel: () => ({ dispose() {} }),
+    onProgress: () => { if (++progressed === 1) { fs.renameSync(replacement, file); cancelled = true; } } };
+  assert.equal(await writeChunksToFile(file, encodeCsv(['i', 's'], bigRows, Infinity), ctl), false);
+  assert.equal(fs.readFileSync(file, 'utf-8'), 'saved by someone else');
   fs.rmSync(dir, { recursive: true });
 });

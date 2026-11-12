@@ -157,27 +157,40 @@ const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve
  * followed and the file keeps its identity, mode and links. On Windows an
  * existing file is truncated first and then opened `r+`, because opening a
  * hidden file with `w` fails with EPERM (microsoft/vscode#931).
+ *
+ * `existed` is false only when this call created the file, which is the
+ * only case where a cancelled export may remove it. A file is created with
+ * O_EXCL, so a file or symlink that appears after the check counts as
+ * existing. A dangling symlink counts as existing too: the file created at
+ * its target is emptied on cancel, not removed.
  */
 export async function openForExport(
   path: string, platform: string = process.platform
 ): Promise<{ handle: fs.promises.FileHandle; existed: boolean }> {
-  const existed = await fs.promises.stat(path).then(() => true, () => false);
+  let existed = await fs.promises.stat(path).then(() => true, () => false);
   if (existed && platform === 'win32') {
     try {
       await fs.promises.truncate(path, 0);
       return { handle: await fs.promises.open(path, 'r+'), existed };
     } catch (error: any) {
       if (error?.code !== 'ENOENT') { throw error; }
-      // Removed in the meantime: create it below.
+      existed = false; // Removed in the meantime: create it below.
     }
   }
-  return { handle: await fs.promises.open(path, 'w'), existed };
+  if (!existed) {
+    try {
+      return { handle: await fs.promises.open(path, 'wx'), existed: false };
+    } catch (error: any) {
+      if (error?.code !== 'EEXIST') { throw error; }
+    }
+  }
+  return { handle: await fs.promises.open(path, 'w'), existed: true };
 }
 
 /**
  * Stream the chunks to a local file opened by `openForExport`. Between
  * chunks the event loop gets a turn, and a full stream buffer waits for
- * 'drain'. On cancel or error a regular file the export created is removed,
+ * 'drain'. On cancel or error a regular file this export created is removed,
  * and a regular file that already existed is left empty (it was truncated
  * when opened). Nothing else is touched: no symlink, FIFO or device is
  * removed. Returns false when cancelled.
