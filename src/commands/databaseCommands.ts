@@ -3,12 +3,14 @@ import { ArcExplorerProvider } from '../providers/arcExplorerProvider';
 import type { ArcTreeItem } from '../providers/arcExplorerProvider';
 import { ConnectionManager } from '../utils/connectionManager';
 import { validateDatabaseName } from '../utils/databaseNames';
+import type { SqlCompletionProvider } from '../providers/sqlCompletionProvider';
 
 /** Database lifecycle commands for the Arc Explorer. */
 export class DatabaseCommands {
   constructor(
     private connectionManager: ConnectionManager,
-    private explorerProvider: ArcExplorerProvider
+    private explorerProvider: ArcExplorerProvider,
+    private completionProvider: SqlCompletionProvider
   ) {}
 
   async createDatabase(): Promise<void> {
@@ -36,11 +38,13 @@ export class DatabaseCommands {
         },
         async () => client.createDatabase(name)
       );
-      this.explorerProvider.refresh();
       vscode.window.showInformationMessage(`Database "${name}" created.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       vscode.window.showErrorMessage(`Failed to create database "${name}": ${message}`);
+    } finally {
+      this.completionProvider.clearCache();
+      this.explorerProvider.refresh();
     }
   }
 
@@ -63,11 +67,13 @@ export class DatabaseCommands {
       return;
     }
 
+    const connection = this.connectionManager.getActiveConnection();
+    const server = connection ? `${connection.protocol}://${connection.host}:${connection.port}` : 'unknown server';
     const confirmation = await vscode.window.showWarningMessage(
-      `Delete database "${database}"?`,
+      `Delete database "${database}" from connection "${connection?.name ?? 'unknown'}" (${server})?`,
       {
         modal: true,
-        detail: 'This permanently removes the database and its stored data. This action cannot be undone.'
+        detail: 'This permanently removes the database and its stored data. Large databases may take longer than the client timeout; if the request times out, Arc may still be processing it. This action cannot be undone.'
       },
       'Delete Database'
     );
@@ -84,17 +90,24 @@ export class DatabaseCommands {
         },
         async () => client.deleteDatabase(database)
       );
-      this.explorerProvider.refresh();
-      if (this.connectionManager.getActiveDatabase() === database) {
+      if (connection && this.connectionManager.getActiveDatabase() === database) {
+        await this.connectionManager.setConnectionDatabase(connection.id, undefined);
         vscode.window.showWarningMessage(
-          `Database "${database}" was deleted. The active connection still references it; update the connection's database setting before running queries.`
+          `Database "${database}" was deleted from "${connection.name}". Its active database selection has been cleared.`
         );
       } else {
-        vscode.window.showInformationMessage(`Database "${database}" deleted.`);
+        vscode.window.showInformationMessage(`Database "${database}" deleted from "${connection?.name ?? 'the active connection'}".`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      vscode.window.showErrorMessage(`Failed to delete database "${database}": ${message}`);
+      const timeoutNote = /timeout|timed out|ECONNABORTED/i.test(message)
+        ? ' Arc may still be processing the deletion; check the server before retrying.'
+        : '';
+      const detail = /[.!?]$/.test(message) ? message : `${message}.`;
+      vscode.window.showErrorMessage(`Failed to delete database "${database}": ${detail}${timeoutNote}`);
+    } finally {
+      this.completionProvider.clearCache();
+      this.explorerProvider.refresh();
     }
   }
 }

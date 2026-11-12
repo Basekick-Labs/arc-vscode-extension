@@ -206,9 +206,7 @@ export class ArcClient {
   }
 
   /**
-   * List measurements through Arc's database-scoped endpoint. This avoids
-   * guessing column positions in SHOW TABLES responses and lets Arc apply
-   * per-database RBAC before returning names.
+   * List all measurements (tables) in a database
    */
   async getMeasurements(database?: string): Promise<MeasurementInfo[]> {
     try {
@@ -234,10 +232,13 @@ export class ArcClient {
         const idx = rows[0].length > 1 ? 1 : 0;
         return filterValidNames(rows.map((row: any[]) => row[idx])).map(name => ({ name }));
       }
-      return filterValidNames(measurements.map((item: any) =>
-        typeof item === 'string' ? item : item?.name
-      )).map(name => ({ name }));
+
+      return [];
     } catch (error) {
+      // A refusal is Arc's decision, not a reason to try another route to the
+      // same data: `/api/v1/measurements` applies the same per-database check
+      // and answers identically, so the fallback would only double the
+      // requests and the audit entries. Surface it.
       const refusal = this.asAccessError(error);
       if (refusal) {
         throw refusal;
@@ -263,6 +264,7 @@ export class ArcClient {
         }
         console.warn('Both SHOW TABLES and /measurements failed:', describeForLog(endpointError));
       }
+
       throw this.handleError(error);
     }
   }
@@ -304,14 +306,21 @@ export class ArcClient {
   }
 
   /**
-   * List databases using Arc's first-class database API.
+   * List all databases using SHOW DATABASES SQL query
    */
   async getDatabases(): Promise<string[]> {
     try {
-      const response = await this.client.get('/api/v1/databases');
-      const databases = response.data?.databases;
-      if (!Array.isArray(databases)) {
-        throw new Error('Unexpected database listing response from Arc');
+      // Arc supports SHOW DATABASES SQL query
+      const response = await this.client.post('/api/v1/query', {
+        sql: 'SHOW DATABASES;'  // Arc API expects 'sql' not 'query'
+      });
+
+      const responseData = response.data;
+
+      // Response format: { columns: ['database'], data: [['default'], ['production'], ...] }
+      const rows = responseData.data || responseData.rows || [];
+      if (Array.isArray(rows)) {
+        return filterValidNames(rows.map((row: any[]) => row[0]));
       }
 
       return [];
@@ -326,24 +335,6 @@ export class ArcClient {
       const refusal = this.asAccessError(error);
       if (refusal) {
         throw refusal;
-      }
-      // Older Arc versions may not expose the database resource route yet.
-      // Fall back to SHOW DATABASES only for a missing route; a 401/403 from
-      // either endpoint is surfaced rather than turned into a fake database.
-      if (axios.isAxiosError(error) && error.response?.status === 404) {
-        try {
-          const legacy = await this.client.post('/api/v1/query', { sql: 'SHOW DATABASES;' });
-          const rows = legacy.data?.data || legacy.data?.rows || [];
-          if (Array.isArray(rows)) {
-            return filterValidNames(rows.map((row: any[]) => row[0]));
-          }
-        } catch (fallbackError) {
-          const fallbackRefusal = this.asAccessError(fallbackError);
-          if (fallbackRefusal) {
-            throw fallbackRefusal;
-          }
-          console.warn('Legacy SHOW DATABASES fallback failed:', fallbackError);
-        }
       }
       throw this.handleError(error);
     }
@@ -397,7 +388,9 @@ export class ArcClient {
         if (detail && /enterprise license/i.test(detail)) {
           return new Error(detail);
         }
-        return new Error(`${detail || `Arc refused to ${operation} the database.`} This operation requires an admin token.`);
+        const reason = detail || `Arc refused to ${operation} the database.`;
+        const punctuated = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+        return new Error(`${punctuated} This operation requires an admin token.`);
       }
       if (detail) {
         return new Error(detail);

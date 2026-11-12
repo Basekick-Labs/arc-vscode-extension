@@ -16,7 +16,7 @@
 - **Query management** - automatic history and saved queries, with execution time, row counts and errors.
 - **Tokens** - create, rotate, verify and delete Arc server tokens from the sidebar. Creating one asks which permissions it should carry (Arc's default is read and write); `read` is what the extension needs to browse databases and run queries.
 - **Themes** - adapts to Light, Dark and High Contrast automatically, charts included.
-- **Database management** - list databases and their measurements through Arc's scoped database API, create databases from the Explorer, and delete them from a database's context menu after an explicit confirmation. Create/delete require an admin token; deletion must also be enabled by the Arc server.
+- **Database management** - browse databases and measurements using the server-compatible listing behaviour, create databases from the Explorer, and delete them from a database's context menu after an explicit confirmation. Create/delete require an admin token; deletion must also be enabled by the Arc server.
 
 See **[FEATURES.md](FEATURES.md)** for the full guide.
 

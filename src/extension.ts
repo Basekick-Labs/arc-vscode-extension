@@ -64,7 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Initialize commands
   const commands = new ArcCommands(connectionManager, explorerProvider, connectionsProvider);
-  const databaseCommands = new DatabaseCommands(connectionManager, explorerProvider);
+  const databaseCommands = new DatabaseCommands(connectionManager, explorerProvider, sqlCompletionProvider);
   commands.setTokensProvider(tokensProvider);
   commands.setQueriesProvider(queriesProvider, queryStorage);
   commands.setAlertsProvider(alertsProvider, alertManager);

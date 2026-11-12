@@ -373,6 +373,10 @@
         {
           "command": "arc.addConnection",
           "when": "false"
+        },
+        {
+          "command": "arc.deleteDatabase",
+          "when": "false"
         }
       ],
       "view/title": [

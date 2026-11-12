@@ -5,7 +5,7 @@ All notable changes to the "Arc Database Manager" extension will be documented i
 ## [Unreleased]
 
 ### Added
-- Database lifecycle from the Explorer: first-class database and scoped measurement listing APIs, create, and confirmed delete (admin token; server deletion must be enabled).
+- Database lifecycle from the Explorer: create databases and delete them after explicit confirmation (admin token; server deletion must be enabled). Existing database and measurement listing behaviour is preserved for scoped-token and older-server compatibility.
 
 ### Fixed
 - **No more made-up `default` database.** `getDatabases()` answered *any* failure by returning `['default']`, so a refused listing, an unreachable server or a server fault all put a database in the explorer that might not exist or might not be readable, with nothing saying why. It now never invents one: a refusal, a network problem or a server error is reported as what it is.
