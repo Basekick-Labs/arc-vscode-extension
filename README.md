@@ -8,7 +8,7 @@
 ## Features
 
 - **Connections** - multiple saved servers, tokens stored in the system keychain, health status in the sidebar and status bar.
-- **Queries** - SQL IntelliSense for tables, columns and DuckDB functions. Run with `Ctrl+Enter` / `Cmd+Enter`. Results export to CSV, JSON or Markdown, and time-series results chart automatically.
+- **Queries** - SQL IntelliSense for tables, columns and DuckDB functions. Run with `Ctrl+Enter` / `Cmd+Enter`. Results export to CSV or JSON (every row, or a limit you choose) and copy as Markdown, and time-series results chart automatically.
 - **Notebooks** - mix SQL and Markdown in `.arcnb` files, run cells individually or all at once, substitute variables into queries, export to Markdown with results.
 - **Schema explorer** - browse databases and tables; right-click any table to preview data, show its schema or statistics, or generate a query.
 - **Data ingestion** - CSV import with delimiter/header detection and batched writes, plus a generator for CPU, memory, network, IoT and custom test data. Both use MessagePack columnar format.
@@ -37,7 +37,9 @@ Arc can restrict a token's reads to particular databases. Newer Arc lists only t
 | `arc.defaultPort` | `8000` | Default Arc server port |
 | `arc.defaultProtocol` | `http` | Default protocol (`http` or `https`) |
 | `arc.queryTimeout` | `30000` | Query timeout in milliseconds |
-| `arc.maxResults` | `1000` | Maximum rows displayed in results |
+| `arc.maxResults` | `1000` | Not used yet: the results table always shows the first 1000 rows. It does not limit exports |
+| `arc.export.maxRows` | `0` | Rows written by Export to CSV / JSON; `0` exports every row of the result |
+| `arc.export.promptForRowCount` | `false` | Ask how many rows to export each time |
 | `arc.resultFormat` | `json` | Result format (`json` or `arrow`) |
 | `arc.telemetry.enabled` | `true` | Send an anonymous daily install beacon (see [Telemetry](#telemetry)) |
 
@@ -83,7 +85,7 @@ Interval:  60s
 
 ## Performance
 
-CSV import and the data generator sustain roughly 50k-200k rows/second using MessagePack columnar writes, with progress reporting on large files. Query results render up to `arc.maxResults` rows.
+CSV import and the data generator sustain roughly 50k-200k rows/second using MessagePack columnar writes, with progress reporting on large files. The results table shows the first 1,000 rows; exports stream the whole result to disk (1M rows of 6 columns: about 1 s to CSV, 2 s to JSON, without blocking the editor).
 
 ## Telemetry
 

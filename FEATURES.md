@@ -115,13 +115,23 @@ Results appear in a dedicated webview panel with:
 
 - **Table view** of results (first 1000 rows)
 - **Row count** and **execution time** statistics
-- **Export options**: CSV, JSON, Markdown
+- **Export options**: CSV, JSON (the whole result), Markdown (the rows shown)
 - **Chart visualization** (auto-detected for time-series data)
 
 **Export Results:**
-1. Click **Export CSV**, **Export JSON**, or **Copy as Markdown**
+1. Click **Export CSV** or **Export JSON** to write every row of the result, not only the 1000 rows in the table, or **Copy as Markdown** to copy the rows shown
 2. Select save location
-3. File is saved with formatted data
+3. File is saved with formatted data. Above 1000 rows a progress notification shows the rows written and can cancel the export; a cancelled or failed export removes the file it was writing, including a file it was replacing
+
+**Export row limit:**
+- `arc.export.maxRows` (default `0` = every row) caps the rows written; `1000` exports what the table shows, as older versions did
+- `arc.export.promptForRowCount` (default off) asks on each export: all rows, the `arc.export.maxRows` limit, or a custom number
+- When a limit cuts the export, the message says `Exported N of M rows`
+
+**Export notes:**
+- The extension keeps the result on screen so it can export it (about 150 MB for 1M rows of 6 columns). It is released when the next query starts or the panel closes; after a failed query, run the query again to export the table still shown
+- With `arc.resultFormat` set to `arrow`, only the first 100,000 rows of a result are kept; exporting a larger one warns and suggests `json`
+- Saving to a non-local file system (a virtual workspace) builds the whole file in memory before writing it
 
 **Chart Visualization:**
 - Automatically detects time-series data
@@ -1392,8 +1402,8 @@ Access via: File → Preferences → Settings → Search "Arc"
 **Query Settings:**
 ```json
 {
-  "arc.maxResultRows": 1000,
-  "arc.queryTimeout": 30000
+  "arc.queryTimeout": 30000,
+  "arc.export.maxRows": 0
 }
 ```
 
