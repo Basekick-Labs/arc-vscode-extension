@@ -85,7 +85,7 @@ Interval:  60s
 
 ## Performance
 
-CSV import and the data generator sustain roughly 50k-200k rows/second using MessagePack columnar writes, with progress reporting on large files. The results table shows the first 1,000 rows; exports stream the whole result to disk (1M rows of 6 columns: about 1 s to CSV, 2 s to JSON, without blocking the editor).
+CSV import and the data generator sustain roughly 50k-200k rows/second using MessagePack columnar writes, with progress reporting on large files. The results table shows the first 1,000 rows; exports stream the whole result to disk in chunks, so the editor stays responsive (1M rows of 6 columns take a second or two).
 
 ## Telemetry
 

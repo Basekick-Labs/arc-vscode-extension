@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -95,7 +95,13 @@ function result(count: number, rowCount = count): ArcQueryResult {
   return { columns, rowCount, executionTime: 1.5,
     rows: Array.from({ length: count }, (_, i) => [1_700_000_000_000 + i, `host-${i},"x"`, i / 4]) };
 }
-const tmpFile = (name: string) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'arc-view-')), name);
+const tmpDirs: string[] = [];
+const tmpFile = (name: string) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-view-'));
+  tmpDirs.push(dir);
+  return path.join(dir, name);
+};
+after(() => tmpDirs.forEach(dir => fs.rmSync(dir, { recursive: true, force: true })));
 const generation = () => Number(/const generation = (\d+);/.exec(state.panel.webview.html)![1]);
 
 /** Send a message as the webview would and wait for the export to finish. */

@@ -180,9 +180,8 @@ test('cancel removes the partial file and reports false', async () => {
   fs.rmSync(dir, { recursive: true });
 });
 
-test('cancel while waiting for drain is honoured', async () => {
+test('cancel before the first write leaves no file', async () => {
   const dir = tmp(), file = path.join(dir, 'out.csv');
-  // One chunk far above the stream's high-water mark makes write() return false.
   const ctl = control();
   function* chunks(): Generator<ExportChunk> {
     yield { text: 'x'.repeat(8 * 1024 * 1024), rows: 1 };
