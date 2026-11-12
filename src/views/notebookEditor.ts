@@ -131,8 +131,19 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         case 'webviewReady':
           if (disposed || this.panelSessions.get(webviewPanel) !== message.sessionId) { break; }
           if (pendingReload) { retryReload(); }
-          else if (message.resuming || document.version !== message.version) { updateWebview(); }
-          else { webviewPanel.webview.postMessage({ command: 'notebookReady', sessionId: message.sessionId }); }
+          else if (message.resuming || (message.initial === true && document.version !== message.version)) { updateWebview(); }
+          else {
+            // Focus/visibility readiness only retries a dropped handshake. A
+            // version gap here is a syncNotebook still in flight (a sibling
+            // saved as the user clicked into this panel), not a stale view:
+            // re-send the current document instead of rebuilding the panel.
+            if (document.version !== message.version) {
+              const current = this.parseNotebook(document.getText());
+              if (!current) { updateWebview(); break; }
+              webviewPanel.webview.postMessage({ command: 'syncNotebook', notebook: current, version: document.version, sessionId: message.sessionId });
+            }
+            webviewPanel.webview.postMessage({ command: 'notebookReady', sessionId: message.sessionId });
+          }
           break;
         case 'reloadReady':
           if (pendingReload && message.reloadId === pendingReload.id && message.sessionId === pendingReload.sessionId) {
@@ -535,9 +546,9 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 vscode.postMessage({ command: 'reloadReady', reloadId: message.reloadId, sessionId, state: recovery.snapshot() });
             }
         });
-        const ready = () => vscode.postMessage({ command: 'webviewReady', sessionId, version: ${document.version}, resuming: recovery.resuming });
-        window.addEventListener('load', ready);
-        window.addEventListener('focus', ready);
+        const ready = (initial = false) => vscode.postMessage({ command: 'webviewReady', sessionId, version: ${document.version}, resuming: recovery.resuming, initial });
+        window.addEventListener('load', () => ready(true));
+        window.addEventListener('focus', () => ready());
         document.addEventListener('visibilitychange', () => { if (!document.hidden) { ready(); } });
         document.getElementById('open-raw').addEventListener('click', () => {
             vscode.postMessage({ command: 'openRaw' });
@@ -841,7 +852,9 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         let variablesReady = false;
         const recovery = (${recoverySource})(vscode, document, notebook, ${JSON.stringify(recoveryState)?.replace(/</g, '\\u003c') ?? 'undefined'}, sessionId);
 
+        let recoveryCaptureTimer = null;
         function captureRecoveryState() {
+            clearTimeout(recoveryCaptureTimer);
             if (recovery.resuming) { return; }
             const variableRows = variablesReady
                 ? Array.from(document.querySelectorAll('.variable-row')).map(row => ({
@@ -864,8 +877,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         // Do not expose a stale embedded snapshot while a recreated frame
         // asks the host for the current document and preserves its old draft.
         setStructuralBusy();
-        const ready = () => vscode.postMessage({ command: 'webviewReady', sessionId, version: lastVersion, resuming: recovery.resuming });
-        window.addEventListener('focus', ready);
+        const ready = (initial = false) => vscode.postMessage({ command: 'webviewReady', sessionId, version: lastVersion, resuming: recovery.resuming, initial });
+        window.addEventListener('focus', () => ready());
         document.addEventListener('visibilitychange', () => { if (!document.hidden) { ready(); } });
 
         // CSP-safe event delegation for buttons
@@ -897,7 +910,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             variablesReady = true;
             setStructuralBusy(!viewReady || preparingReload);
             captureRecoveryState();
-            ready();
+            ready(true);
         });
 
         function renderVariables() {
@@ -911,11 +924,14 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             variablesDomBase = readVariablesFromDom();
         }
 
-        function renderVariablesPreservingState() {
+        function renderVariablesPreservingState(previousVars = {}) {
             const container = document.getElementById('variables-list');
-            // Never replace an input while typing, including incomplete keys,
-            // trailing spaces, or a row whose name is still empty.
-            if (container.contains(document.activeElement)) { return; }
+            // While an input in this list is focused, keep the row set and key
+            // inputs as they are (incomplete keys, trailing spaces, rows whose
+            // name is still empty). Values are still patched in place: a stale
+            // value in a focused input would become the next keystroke's base
+            // and overwrite a sibling's edit of the same variable.
+            const focusedInside = container.contains(document.activeElement);
             const rows = Array.from(container.querySelectorAll('.variable-row'));
             const vars = notebook.globalVariables || {};
             const byKey = new Map(rows.map(row => [row.dataset.variableKey, row]));
@@ -925,16 +941,27 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 if (row) {
                     const keyInput = row.querySelector('input[name="key"]');
                     const valueInput = row.querySelector('input[name="value"]');
-                    if (keyInput.value.trim() !== key) { keyInput.value = key; }
-                    if (valueInput.value !== notebookValueText(value)) { valueInput.value = notebookValueText(value); }
+                    const text = notebookValueText(value);
+                    if (!focusedInside && keyInput.value.trim() !== key) { keyInput.value = key; }
+                    // Input events keep the model equal to the DOM, so a
+                    // differing merged value means the sibling won this key.
+                    if (valueInput.value !== text && (valueInput !== document.activeElement ||
+                        valueInput.value === notebookValueText(previousVars[key]))) {
+                        const { selectionStart, selectionEnd, selectionDirection } = valueInput;
+                        valueInput.value = text;
+                        if (valueInput === document.activeElement) {
+                            valueInput.setSelectionRange(Math.min(selectionStart, text.length),
+                                Math.min(selectionEnd, text.length), selectionDirection);
+                        }
+                    }
                     kept.add(row);
-                } else {
+                } else if (!focusedInside) {
                     addVariableRow(key, value);
                 }
             });
             rows.forEach(row => {
                 // Empty rows are drafts, not missing persisted variables.
-                if (!kept.has(row) && row.querySelector('input[name="key"]').value.trim()) {
+                if (!focusedInside && !kept.has(row) && row.querySelector('input[name="key"]').value.trim()) {
                     row.remove();
                 }
             });
@@ -1069,8 +1096,18 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         let autosaveTimer = null;
         let autosaveDeadline = 0;
 
+        // captureRecoveryState() serialises the whole notebook, outputs
+        // included, several times; run per keystroke it cost ~90 ms on a
+        // 10k-row result. Capture once typing pauses instead. saveNotebook()
+        // and prepareReload still capture synchronously before they act.
+        const RECOVERY_CAPTURE_IDLE_MS = 250;
+        function scheduleRecoveryCapture() {
+            clearTimeout(recoveryCaptureTimer);
+            recoveryCaptureTimer = setTimeout(captureRecoveryState, RECOVERY_CAPTURE_IDLE_MS);
+        }
+
         function scheduleAutosave() {
-            captureRecoveryState();
+            scheduleRecoveryCapture();
             const now = Date.now();
             if (autosaveTimer === null) {
                 autosaveDeadline = now + AUTOSAVE_MAX_MS;
@@ -1167,14 +1204,29 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 const textarea = document.querySelector(
                     \`#cell-\${index} textarea[data-cell-index]\`
                 );
-                // Defer a pristine focused textarea's remote update until
-                // blur. Do not manufacture a new local edit and echo it back.
-                // Real input events have already updated the local model.
-                if (textarea && document.activeElement !== textarea && textarea.value !== cell.content) {
+                // Input events keep the model equal to the textarea, so a
+                // differing merged value means the sibling's edit won this
+                // field (no local edit was pending). Apply it even when the
+                // textarea is focused: an iframe keeps its activeElement while
+                // the user types in another panel, and a deferred stale value
+                // would become the next keystroke's base and overwrite the
+                // sibling's edit on disk. Setting .value fires no input event,
+                // so nothing is echoed back.
+                const focused = document.activeElement === textarea;
+                if (textarea && textarea.value !== cell.content &&
+                    (!focused || textarea.value === previousCell.content)) {
                     const scrollTop = textarea.scrollTop;
                     const scrollLeft = textarea.scrollLeft;
+                    const { selectionStart, selectionEnd, selectionDirection } = textarea;
                     textarea.value = cell.content;
                     textarea.rows = Math.max(3, cell.content.split('\\n').length);
+                    if (focused) {
+                        textarea.setSelectionRange(
+                            Math.min(selectionStart, cell.content.length),
+                            Math.min(selectionEnd, cell.content.length),
+                            selectionDirection
+                        );
+                    }
                     textarea.scrollTop = scrollTop;
                     textarea.scrollLeft = scrollLeft;
                 }
@@ -1182,7 +1234,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                     renderCellOutput(index);
                 }
             });
-            renderVariablesPreservingState();
+            renderVariablesPreservingState(previousNotebook.globalVariables || {});
             setStructuralBusy(!viewReady || preparingReload || structuralPending || !!inFlight?.structural);
             captureRecoveryState();
             if (structuralPending) { saveNotebook(true); }

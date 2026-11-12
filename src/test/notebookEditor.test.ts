@@ -201,12 +201,13 @@ test('slow cell1 result and sibling sync retain cell0 typing through host saves'
   assert.deepEqual(b.host.read().cells[1].output, { rows: [[99]], rowCount: 1 });
 });
 
-test('sync skips focused text, preserves caret, grows remote rows and does not save clean snapshots', async t => {
+test('sync updates pristine focused text in place, preserves caret, grows remote rows and does not save clean snapshots', async t => {
   const b = await browser(); t.after(() => b.dom.window.close());
   const focused = b.cell(0); focused.focus(); focused.setSelectionRange(2, 4);
   const remote = fixture(); remote.cells[0].content = 'remote'; remote.cells[1].content = '1\n2\n3\n4\n5';
   b.receive({ command: 'syncNotebook', notebook: remote, version: 2 });
-  assert.equal(focused.value, 'SELECT 0'); assert.equal(focused.selectionStart, 2); assert.equal(focused.selectionEnd, 4);
+  assert.equal(b.window.document.activeElement, focused);
+  assert.equal(focused.value, 'remote'); assert.equal(focused.selectionStart, 2); assert.equal(focused.selectionEnd, 4);
   assert.equal(b.cell(1).rows, 5); assert.equal(b.cell(1).value, remote.cells[1].content);
   const clean = await browser(); t.after(() => clean.dom.window.close());
   clean.receive({ command: 'syncNotebook', notebook: fixture(), version: 2 }); clean.flush();
@@ -245,7 +246,7 @@ test('focused variable delta does not overwrite remote changes hidden during foc
   inputs[0].focus();
   const remote = copy(initial); remote.globalVariables.second = 'remote';
   b.receive({ command: 'syncNotebook', notebook: remote, version: 2 });
-  assert.equal(inputs[1].value, 'old');
+  assert.equal(inputs[1].value, 'remote');
   b.input(inputs[0], 'local'); b.flush();
   assert.deepEqual(b.sent[0].notebook.globalVariables, { first: 'local', second: 'remote' });
 });
@@ -304,7 +305,7 @@ for (const action of ['addCell', 'executeCell'] as const) {
     const textarea = b.cell(0); textarea.focus();
     const remote = fixture(); remote.cells[0].content = 'SELECT canonical_remote';
     b.receive({ command: 'syncNotebook', notebook: remote, version: 2 });
-    assert.equal(textarea.value, 'SELECT 0');
+    assert.equal(textarea.value, 'SELECT canonical_remote');
     textarea.blur();
     // Deliberately stay in this task: the deferred blur refresh has not run.
     const selector = action === 'addCell' ? '[data-action="addCell"][data-type="sql"]' :
@@ -724,6 +725,8 @@ for (const trigger of ['client focus', 'panel reveal', 'webview recreation'] as 
   test(`dropped reload request retries same handshake on ${trigger} and recovers exact pending edits`, async t => {
     const b = await recoveryBrowser(); t.after(b.close);
     b.input('#cell-0 textarea', 'draft survives dropped reload');
+    // The draft is persisted once typing pauses (RECOVERY_CAPTURE_IDLE_MS).
+    await new Promise(resolve => setTimeout(resolve, 300));
     b.setDropReloadRequests(true);
     const current = fixture(); current.cells.reverse();
     const originalHtml = b.panel.panel.webview.html;
@@ -907,3 +910,61 @@ for (const target of ['global variable', 'output row'] as const) {
     }
   });
 }
+
+test('a stale focused textarea cannot overwrite a sibling edit on the next keystroke', async t => {
+  // An iframe keeps document.activeElement while the user types in another
+  // panel, so "focused" does not mean "the user is typing here".
+  const b = await browser(); t.after(() => b.dom.window.close());
+  const textarea = b.cell(0); textarea.focus();
+  const remote = fixture(); remote.cells[0].content = 'SELECT edited_in_sibling';
+  await b.host.panel().then(sibling => sibling.save(remote));
+  b.receive({ command: 'syncNotebook', notebook: b.host.read(), version: 2 });
+  assert.equal(textarea.value, 'SELECT edited_in_sibling');
+  b.input(textarea, textarea.value + ' -- typed here'); b.flush();
+  await b.panel.send(b.sent[0]);
+  assert.equal(b.host.read().cells[0].content, 'SELECT edited_in_sibling -- typed here');
+});
+
+test('a focused variable value cannot overwrite a sibling edit of the same variable', async t => {
+  const initial = { ...fixture(), globalVariables: { first: 'old', second: 'old' } };
+  const b = await browser(initial); t.after(() => b.dom.window.close());
+  const inputs = b.window.document.querySelectorAll('input[name="value"]');
+  inputs[0].focus(); inputs[0].setSelectionRange(1, 1);
+  const remote = copy(initial); remote.globalVariables.first = 'remote';
+  b.receive({ command: 'syncNotebook', notebook: remote, version: 2 });
+  assert.equal(b.window.document.activeElement, inputs[0]);
+  assert.equal(inputs[0].value, 'remote'); assert.equal(inputs[0].selectionStart, 1);
+  b.input(inputs[0], inputs[0].value + 'X'); b.flush();
+  assert.deepEqual(b.sent[0].notebook.globalVariables, { first: 'remoteX', second: 'old' });
+});
+
+test('typing does not capture recovery state per keystroke, only once input pauses', async t => {
+  const b = await browser(); t.after(() => b.dom.window.close());
+  const original = b.window.captureRecoveryState;
+  let captures = 0;
+  b.window.captureRecoveryState = () => { captures++; original(); };
+  for (let i = 0; i < 20; i++) { b.input(b.cell(0), 'SELECT ' + i); }
+  assert.equal(captures, 0);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(captures, 1);
+});
+
+test('focus readiness with a pre-sync version re-sends the document instead of rebuilding the panel', async t => {
+  const b = await browser(); t.after(() => b.dom.window.close());
+  const sibling = await b.host.panel();
+  const reloads: any[] = [];
+  b.panel.setReloadHandler(message => reloads.push(message));
+  const changed = fixture(); changed.cells[0].content = 'typed in sibling';
+  await sibling.save(changed);
+  // The click into this panel races the sibling's broadcast: readiness still
+  // carries the version this panel had before the sync arrived.
+  await b.panel.send({ command: 'webviewReady', version: 1, resuming: false });
+  assert.equal(reloads.length, 0);
+  const resent = b.panel.messages.filter(message => message.command === 'syncNotebook').at(-1);
+  assert.deepEqual(resent.notebook, b.host.read());
+  b.receive(resent);
+  assert.equal(b.cell(0).value, 'typed in sibling');
+  // The initial load readiness still rebuilds a frame that rendered stale HTML.
+  await b.panel.send({ command: 'webviewReady', version: 1, resuming: false, initial: true });
+  assert.equal(reloads.length, 1);
+});
