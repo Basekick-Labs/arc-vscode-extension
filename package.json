@@ -338,6 +338,17 @@
           "default": 1000,
           "description": "Maximum number of results to display"
         },
+        "arc.export.maxRows": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Maximum number of rows written by **Export to CSV** and **Export to JSON** in the query results view. `0` exports every row the extension holds for the result. This is not the table's display limit."
+        },
+        "arc.export.promptForRowCount": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Ask how many rows to export (all rows, the `#arc.export.maxRows#` limit, or a custom number) each time results are exported."
+        },
         "arc.resultFormat": {
           "type": "string",
           "enum": [
