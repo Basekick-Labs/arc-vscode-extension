@@ -12,6 +12,12 @@ const fixture = (): ArcNotebook => ({ version: '1', cells: [
 ] });
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
+function outputChangesBetween(base: ArcNotebook, notebook: ArcNotebook): number[] {
+  return notebook.cells.map((cell, index) =>
+    JSON.stringify(cell.output) === JSON.stringify(base.cells[index]?.output) ? -1 : index
+  ).filter(index => index !== -1);
+}
+
 async function harness(initial = fixture(), connectionManager: any = { isConnected: () => false }) {
   let text = JSON.stringify(initial);
   const changes = new Set<(event: any) => void>();
@@ -86,8 +92,10 @@ async function harness(initial = fixture(), connectionManager: any = { isConnect
       setReadyHandler: (handler: (message: any) => void) => { readyHandler = handler; },
       setReloadHandler: (handler: (message: any) => void) => { reloadHandler = handler; },
       flushReloads: async () => { await Promise.all(pendingReloads.splice(0)); }, send: (message: any) => receiver({ sessionId, ...message }),
+      // Like the webview: list the cells whose output differs from the base.
       save: (notebook: ArcNotebook, base = initial, saveId = 1) => receiver({
-        command: 'save', notebook: copy(notebook), base: copy(base), saveId, sessionId
+        command: 'save', notebook: copy(notebook), base: copy(base), saveId, sessionId,
+        outputChanges: outputChangesBetween(base, notebook)
       }) };
   }
   return { panel, document, writes, errors, fileWrites,
@@ -135,8 +143,13 @@ test('host serializes sibling saves and reads after previous write, acknowledgin
   release(); await Promise.all([first, second]);
   assert.equal(h.read().cells[0].content, 'typing');
   assert.deepEqual(h.read().cells[1].output, output.cells[1].output);
-  assert.deepEqual(a.messages.at(-1).notebook, h.read());
-  assert.deepEqual(b.messages.at(-1).notebook, h.read());
+  // Broadcasts carry the written document without outputs, plus the outputs
+  // this write changed (none back to the sender, which already has them).
+  const stripped = { ...h.read(), cells: h.read().cells.map(({ output: _o, ...cell }) => cell) };
+  assert.deepEqual(a.messages.at(-1).notebook, stripped);
+  assert.deepEqual(b.messages.at(-1).notebook, stripped);
+  assert.deepEqual(a.messages.at(-1).delta, { baseVersion: 2, changed: [1], outputs: Object.fromEntries([[1, { output: output.cells[1].output }]]) });
+  assert.deepEqual(b.messages.at(-1).delta, { baseVersion: 2, changed: [1], outputs: {} });
   assert.equal(b.messages.at(-1).saveId, 1);
   assert.equal(a.messages.at(-1).saveId, undefined);
 });
@@ -1036,6 +1049,120 @@ test('a delta that does not start from the panel snapshot rebuilds instead of gu
   const next = fixture();
   b.receive({ command: 'syncNotebook', notebook: next, version: 5, delta: { baseVersion: 3, changed: [], outputs: {} } });
   assert.equal(b.sent.at(-1)?.command, 'reloadNotebook');
+});
+
+test('add cell after a synced save works on a notebook whose keys are not in the extension order', async t => {
+  // A file the extension did not write: output before content, and an extra
+  // field after output. The host's structural check must not depend on key order.
+  const initial = { version: '1', cells: [
+    { type: 'sql', content: 'SELECT 0' },
+    { type: 'sql', output: { columns: ['v'], rows: [[1]], rowCount: 1 }, content: 'SELECT 1' },
+    { type: 'sql', content: 'SELECT 2', output: { columns: ['v'], rows: [[2]], rowCount: 1 }, variables: { x: '1' } }
+  ] } as ArcNotebook;
+  const b = await browser(initial); t.after(() => b.dom.window.close());
+  b.input(b.cell(0), 'typed'); b.flush();
+  await b.panel.send(b.sent.at(-1));
+  b.receive(b.panel.messages.at(-1));
+  (b.window.document.querySelector('[data-action="addCell"][data-type="sql"]') as any).click();
+  const structural = b.sent.at(-1);
+  assert.equal(structural.structural, true);
+  await b.panel.send(structural);
+  assert.notEqual(b.panel.messages.at(-1)?.command, 'saveFailed');
+  assert.equal(b.host.errors.length, 0);
+  assert.equal(b.host.read().cells.length, 4);
+  assert.equal(b.host.read().cells[0].content, 'typed');
+  assert.deepEqual(b.host.read().cells[2].output, initial.cells[2].output);
+});
+
+test('a result that was not saved yet survives a rebuild in the recovery copy', async t => {
+  const b = await recoveryBrowser(); t.after(b.close);
+  const sibling = await b.host.panel();
+  b.receive({ command: 'cellResult', index: 1, output: { columns: ['v'], rows: [[987654]], rowCount: 1 } });
+  const changed = fixture(); changed.cells.push({ type: 'sql', content: 'added by sibling' });
+  await sibling.send({ command: 'save', notebook: changed, base: fixture(), structural: true, saveId: 1 });
+  await b.mount();
+  assert.deepEqual(b.host.read(), changed);
+  assert.equal(b.state.recoveries.length, 1);
+  assert.ok(b.recoveryText.includes('987654'));
+});
+
+test('a result that was saved does not reappear as a recovery copy', async t => {
+  const b = await recoveryBrowser(); t.after(b.close);
+  const sibling = await b.host.panel();
+  b.receive({ command: 'cellResult', index: 1, output: { columns: ['v'], rows: [[987654]], rowCount: 1 } });
+  b.window.dispatchEvent(new b.window.Event('blur'));
+  await b.panel.send(b.sent.filter(message => message.command === 'save').at(-1));
+  b.receive(b.panel.messages.at(-1));
+  const changed = b.host.read(); changed.cells.push({ type: 'sql', content: 'added by sibling' });
+  await sibling.send({ command: 'save', notebook: changed, base: b.host.read(), structural: true, saveId: 1 });
+  await b.mount();
+  assert.equal(b.host.read().cells.length, 3);
+  assert.equal(b.state.recoveries.length, 0);
+});
+
+test('a focused CRLF cell still takes a sibling edit (textarea.value normalises line breaks)', async t => {
+  const initial = fixture(); initial.cells[0].content = 'SELECT\r\n0';
+  const b = await browser(initial); t.after(() => b.dom.window.close());
+  const textarea = b.cell(0); textarea.focus();
+  const remote = copy(initial); remote.cells[0].content = 'SELECT edited_in_sibling';
+  await b.host.panel().then(sibling => sibling.save(remote, initial));
+  b.receive({ command: 'syncNotebook', notebook: b.host.read(), version: 2 });
+  assert.equal(textarea.value, 'SELECT edited_in_sibling');
+  b.input(textarea, textarea.value + ' -- typed here'); b.flush();
+  await b.panel.send(b.sent[0]);
+  assert.equal(b.host.read().cells[0].content, 'SELECT edited_in_sibling -- typed here');
+});
+
+test('a focused variable whose value has a line break still takes a sibling edit', async t => {
+  const initial = { ...fixture(), globalVariables: { first: 'a\r\nb', second: 'old' } };
+  const b = await browser(initial); t.after(() => b.dom.window.close());
+  const inputs = b.window.document.querySelectorAll('input[name="value"]');
+  inputs[0].focus();
+  const remote = copy(initial); remote.globalVariables.first = 'remote';
+  b.receive({ command: 'syncNotebook', notebook: remote, version: 2 });
+  assert.equal(inputs[0].value, 'remote');
+  b.input(inputs[0], inputs[0].value + 'X'); b.flush();
+  assert.deepEqual(b.sent[0].notebook.globalVariables, { first: 'remoteX', second: 'old' });
+});
+
+test('an unrelated sync does not rewrite a CRLF cell or a variable with a line break', async t => {
+  // Each programmatic .value write resets the field's undo history, so a
+  // field whose stored value only differs by line-break form must be left alone.
+  const initial = { ...fixture(), globalVariables: { first: 'a\r\nb' } };
+  initial.cells[0].content = 'SELECT\r\n0';
+  const b = await browser(initial); t.after(() => b.dom.window.close());
+  const writes = { count: 0 };
+  const watch = (element: any, proto: any) => {
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')!;
+    Object.defineProperty(element, 'value', {
+      get() { return descriptor.get!.call(this); },
+      set(value) { writes.count++; descriptor.set!.call(this, value); }
+    });
+  };
+  watch(b.cell(0), b.window.HTMLTextAreaElement.prototype);
+  watch(b.window.document.querySelector('input[name="value"]'), b.window.HTMLInputElement.prototype);
+  b.cell(0).focus();
+  const remote = copy(initial); remote.cells[1].content = 'SELECT changed elsewhere';
+  b.receive({ command: 'syncNotebook', notebook: remote, version: 2 });
+  assert.equal(b.cell(1).value, 'SELECT changed elsewhere');
+  assert.equal(writes.count, 0);
+});
+
+test('a delta for a write the panel already has is ignored, not rebuilt', async t => {
+  const b = await browser(); t.after(() => b.dom.window.close());
+  // Rendered at version 1, after the write 0 -> 1 had applied.
+  b.receive({ command: 'syncNotebook', notebook: fixture(), version: 1, delta: { baseVersion: 0, changed: [], outputs: {} } });
+  assert.equal(b.sent.filter(message => message.command === 'reloadNotebook').length, 0);
+});
+
+test('host rejects a non-structural save without a valid output change list', async () => {
+  for (const outputChanges of [undefined, [5], ['1'], [-1]]) {
+    const h = await harness(), a = await h.panel();
+    const changed = fixture(); changed.cells[0].content = 'edit';
+    await a.send({ command: 'save', notebook: changed, base: fixture(), outputChanges, structural: false, saveId: 1 });
+    assert.deepEqual(a.messages, [{ command: 'saveFailed', saveId: 1, sessionId: a.sessionId }]);
+    assert.equal(h.writes.length, 0);
+  }
 });
 
 test('focus readiness with a pre-sync version re-sends the document instead of rebuilding the panel', async t => {

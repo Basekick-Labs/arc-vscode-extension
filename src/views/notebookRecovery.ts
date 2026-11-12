@@ -30,16 +30,21 @@ interface RecoveryApi {
  */
 export function createNotebookRecovery(api: RecoveryApi, document: any, current?: ArcNotebook, transferredState?: RecoveryState, sessionId?: string) {
   const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value));
-  // Drafts keep what the user typed, not query results: outputs can be re-run,
-  // and copying them made every capture cost megabytes for a large result.
-  const strip = (notebook: ArcNotebook): ArcNotebook => ({
+  // Drafts keep what the user typed plus any result that is not saved yet.
+  // A result already in the base is left out: it is on disk, and copying it
+  // made every capture cost megabytes for a large result. keep lists the
+  // cells whose output the draft carries.
+  const project = (notebook: ArcNotebook, keep: number[]): ArcNotebook => ({
     ...notebook,
-    cells: notebook.cells.map(cell => {
+    cells: notebook.cells.map((cell, index) => {
       const rest = { ...cell };
-      delete rest.output;
+      if (!keep.includes(index)) { delete rest.output; }
       return rest;
     })
   });
+  const carried = (notebook: ArcNotebook) => notebook.cells
+    .map((cell, index) => Object.prototype.hasOwnProperty.call(cell, 'output') ? index : -1)
+    .filter(index => index !== -1);
   const textValue = (value: unknown): string => {
     if (value === null || value === undefined) { return ''; }
     try { return String(value); }
@@ -66,8 +71,11 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
   const resuming = !!sessionId && previous?.sessionId === sessionId;
   const oldDraft = previous?.draft;
   if (oldDraft && !resuming) {
-    const unsavedModel = !same(strip(oldDraft.notebook), strip(oldDraft.base)) &&
-      !(current && same(strip(oldDraft.notebook), strip(current)));
+    // Compare the draft with the base and with the current document as the
+    // draft carries them: outputs only for the cells whose result was unsaved.
+    const keep = carried(oldDraft.notebook);
+    const unsavedModel = !same(oldDraft.notebook, project(oldDraft.base, keep)) &&
+      !(current && same(oldDraft.notebook, project(current, keep)));
     const incompleteRows = !same(oldDraft.variableRows, rowsFor(oldDraft.notebook));
     if ((unsavedModel || incompleteRows) && !recoveries.some(item => same(item.draft, oldDraft))) {
       recoveries.push({ id: `${Date.now()}-${recoveries.length}`, draft: copy(oldDraft) });
@@ -76,7 +84,7 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
   if (resuming) {
     active = oldDraft ? copy(oldDraft) : undefined;
   } else if (current) {
-    active = { notebook: copy(strip(current)), base: copy(strip(current)), variableRows: rowsFor(current) };
+    active = { notebook: copy(project(current, [])), base: copy(project(current, [])), variableRows: rowsFor(current) };
   }
 
   const persist = () => api.setState(copy({ revision: ++revision, sessionId, draft: active, recoveries }));
@@ -124,7 +132,12 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
     resuming,
     snapshot(): RecoveryState { return copy({ revision, sessionId, draft: active, recoveries }); },
     capture(notebook: ArcNotebook, base: ArcNotebook, variableRows: NotebookDraft['variableRows']) {
-      active = copy({ notebook: strip(notebook), base: strip(base), variableRows });
+      // Outputs are replaced whole, never mutated, so a reference check finds
+      // the results that are not in the base yet without reading them.
+      const unsaved = notebook.cells
+        .map((cell, index) => cell.output !== base.cells[index]?.output && cell.output !== undefined ? index : -1)
+        .filter(index => index !== -1);
+      active = copy({ notebook: project(notebook, unsaved), base: project(base, []), variableRows });
       persist();
     }
   };

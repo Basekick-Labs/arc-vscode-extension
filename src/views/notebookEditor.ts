@@ -5,6 +5,28 @@ import { escapeHtml } from '../utils/sqlUtils';
 import { mergeSyncedNotebook, notebookValueText, sameNotebookValue } from './notebookSync';
 import { createNotebookRecovery, NotebookDraft } from './notebookRecovery';
 
+/**
+ * JSON text with object keys sorted, after a JSON round trip (so NaN/-0/
+ * undefined read the same as they do once written to disk). Used where two
+ * notebooks must be equal as documents: a file's own key order (for example
+ * output before content, or extra fields after output) must not make a
+ * snapshot "differ" from the document it was taken from.
+ */
+function canonicalJson(value: unknown): string {
+  const sortKeys = (node: unknown): unknown => {
+    if (Array.isArray(node)) { return node.map(sortKeys); }
+    if (node !== null && typeof node === 'object') {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(node as Record<string, unknown>).sort()) {
+        Object.defineProperty(sorted, key, { value: sortKeys((node as Record<string, unknown>)[key]), enumerable: true, writable: true, configurable: true });
+      }
+      return sorted;
+    }
+    return node;
+  };
+  return JSON.stringify(sortKeys(JSON.parse(JSON.stringify(value) ?? 'null')));
+}
+
 export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvider {
   public static register(context: vscode.ExtensionContext, connectionManager: ConnectionManager): vscode.Disposable {
     const provider = new ArcNotebookEditorProvider(context, connectionManager);
@@ -305,7 +327,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
       left.cells.length === right.cells.length && left.cells.every((cell, index) =>
         cell.type === right.cells[index].type
       );
-    if (structural ? JSON.stringify(current) !== JSON.stringify(base) :
+    if (structural ? canonicalJson(current) !== canonicalJson(base) :
       !sameStructure(base, current) || !sameStructure(base, notebook)) {
       fail('The notebook structure or contents changed before this save could be applied.');
       return;
@@ -319,6 +341,12 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     const changes = !structural && Array.isArray(outputChanges) &&
       outputChanges.every(index => Number.isInteger(index) && index >= 0 && index < notebook.cells.length)
       ? outputChanges as number[] : undefined;
+    if (!structural && !changes) {
+      // Without the list, outputs would be merged against a base that carries
+      // none, and every stale local result would overwrite a newer one.
+      fail('The notebook save was malformed (missing output changes), so it was not applied.');
+      return;
+    }
     const merged = structural ? notebook : mergeSyncedNotebook(base, notebook, current, changes);
     const json = JSON.stringify(merged, null, 2);
     const normalized = this.normalize(json)!;
@@ -963,7 +991,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             variablesDomBase = readVariablesFromDom();
         }
 
-        function renderVariablesPreservingState(previousVars = {}) {
+        function renderVariablesPreservingState() {
             const container = document.getElementById('variables-list');
             // While an input in this list is focused, keep the row set and key
             // inputs as they are (incomplete keys, trailing spaces, rows whose
@@ -980,12 +1008,15 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 if (row) {
                     const keyInput = row.querySelector('input[name="key"]');
                     const valueInput = row.querySelector('input[name="value"]');
-                    const text = notebookValueText(value);
+                    // <input>.value drops line breaks, so compare what the
+                    // input can actually hold.
+                    const text = notebookValueText(value).replace(/[\\r\\n]/g, '');
                     if (!focusedInside && keyInput.value.trim() !== key) { keyInput.value = key; }
-                    // Input events keep the model equal to the DOM, so a
-                    // differing merged value means the sibling won this key.
-                    if (valueInput.value !== text && (valueInput !== document.activeElement ||
-                        valueInput.value === notebookValueText(previousVars[key]))) {
+                    // Input events keep the model equal to the DOM, and the
+                    // merge keeps a pending local value, so a differing merged
+                    // value means the sibling won this key: patch it, focused
+                    // or not.
+                    if (valueInput.value !== text) {
                         const { selectionStart, selectionEnd, selectionDirection } = valueInput;
                         valueInput.value = text;
                         if (valueInput === document.activeElement) {
@@ -1263,6 +1294,9 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 return;
             }
 
+            // A delta for a write this panel already has (it rendered, or got a
+            // full re-send, after the write applied) needs no rebuild.
+            if (delta && !acknowledged && version === lastVersion && delta.baseVersion !== lastVersion) { return; }
             nextNotebook = hydrate(nextNotebook, delta, acknowledged);
             if (!nextNotebook) {
                 // A delta that does not start from this panel's snapshot
@@ -1273,7 +1307,10 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             }
             const previousNotebook = notebook;
             const savedNotebook = acknowledged ? inFlight.notebook : lastSaved;
-            notebook = mergeSyncedNotebook(savedNotebook, previousNotebook, nextNotebook);
+            // Snapshot: the model is mutated by typing, lastSaved never is, so
+            // the two must not be the same object even if the merge returns
+            // its incoming argument.
+            notebook = snapshotNotebook(mergeSyncedNotebook(savedNotebook, previousNotebook, nextNotebook));
             lastSaved = nextNotebook;
             lastVersion = version;
             if (acknowledged) { inFlight = null; }
@@ -1290,9 +1327,14 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 // would become the next keystroke's base and overwrite the
                 // sibling's edit on disk. Setting .value fires no input event,
                 // so nothing is echoed back.
+                // <textarea>.value normalises CRLF/CR to LF, so compare in
+                // that form (a CRLF cell would otherwise never match).
+                // The merge keeps a pending local edit in cell.content, so a
+                // difference here means the sibling's value won this cell.
+                // Caret and selection are kept by offset; the textarea's own
+                // undo history is reset by the programmatic update.
                 const focused = document.activeElement === textarea;
-                if (textarea && textarea.value !== cell.content &&
-                    (!focused || textarea.value === previousCell.content)) {
+                if (textarea && textarea.value !== cell.content.replace(/\\r\\n?/g, '\\n')) {
                     const scrollTop = textarea.scrollTop;
                     const scrollLeft = textarea.scrollLeft;
                     const { selectionStart, selectionEnd, selectionDirection } = textarea;
@@ -1312,7 +1354,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                     renderCellOutput(index);
                 }
             });
-            renderVariablesPreservingState(previousNotebook.globalVariables || {});
+            renderVariablesPreservingState();
             setStructuralBusy(!viewReady || preparingReload || structuralPending || !!inFlight?.structural);
             captureRecoveryState();
             if (structuralPending) { saveNotebook(true); }
