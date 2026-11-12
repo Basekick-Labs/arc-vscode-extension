@@ -43,7 +43,9 @@ export function normalizeCell(value: unknown): unknown {
     case 'object': {
       if (value === null) { return null; }
       const json = JSON.stringify(value);
-      return json === undefined ? null : JSON.parse(json, dropProto);
+      if (json === undefined) { return null; }
+      // The reviver is slow; only use it when the key can be there.
+      return json.includes('"__proto__"') ? JSON.parse(json, dropProto) : JSON.parse(json);
     }
     case 'bigint':
       // Not produced by the parsers (top-level Int64 is converted); behave
