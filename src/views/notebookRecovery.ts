@@ -55,7 +55,24 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
   };
   const rowsFor = (notebook: ArcNotebook) => Object.entries(notebook.globalVariables ?? {})
     .map(([key, value]) => ({ key, value: textValue(value) }));
-  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+  // Equal as JSON documents: key order is not significant (a notebook file
+  // may order a cell's keys differently from the extension), so compare with
+  // object keys sorted. Kept local because this function must stay closure-free.
+  const canonical = (value: unknown): string => {
+    const sortKeys = (node: unknown): unknown => {
+      if (Array.isArray(node)) { return node.map(sortKeys); }
+      if (node !== null && typeof node === 'object') {
+        const sorted: Record<string, unknown> = {};
+        for (const key of Object.keys(node as Record<string, unknown>).sort()) {
+          Object.defineProperty(sorted, key, { value: sortKeys((node as Record<string, unknown>)[key]), enumerable: true, writable: true, configurable: true });
+        }
+        return sorted;
+      }
+      return node;
+    };
+    return JSON.stringify(sortKeys(value)) ?? 'undefined';
+  };
+  const same = (left: unknown, right: unknown) => canonical(left) === canonical(right);
   const persisted = api.getState();
   // HTML can be recreated later with its original transfer embedded. Prefer
   // a newer persisted state so dismissed recoveries do not reappear and later
@@ -133,9 +150,12 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
     snapshot(): RecoveryState { return copy({ revision, sessionId, draft: active, recoveries }); },
     capture(notebook: ArcNotebook, base: ArcNotebook, variableRows: NotebookDraft['variableRows']) {
       // Outputs are replaced whole, never mutated, so a reference check finds
-      // the results that are not in the base yet without reading them.
+      // the results that are not in the base yet without reading them. Match
+      // by object, not by position: while a local add/delete is pending the
+      // indexes shift, and a saved result must not be copied as unsaved.
+      const saved = new Set(base.cells.map(cell => cell.output));
       const unsaved = notebook.cells
-        .map((cell, index) => cell.output !== base.cells[index]?.output && cell.output !== undefined ? index : -1)
+        .map((cell, index) => cell.output !== undefined && !saved.has(cell.output) ? index : -1)
         .filter(index => index !== -1);
       active = copy({ notebook: project(notebook, unsaved), base: project(base, []), variableRows });
       persist();

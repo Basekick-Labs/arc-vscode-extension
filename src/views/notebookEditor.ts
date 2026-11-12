@@ -6,8 +6,11 @@ import { mergeSyncedNotebook, notebookValueText, sameNotebookValue } from './not
 import { createNotebookRecovery, NotebookDraft } from './notebookRecovery';
 
 /**
- * JSON text with object keys sorted, after a JSON round trip (so NaN/-0/
- * undefined read the same as they do once written to disk). Used where two
+ * JSON text with object keys sorted. JSON.stringify itself writes NaN and
+ * Infinity as null, -0 as 0 and drops undefined properties, so a value reads
+ * here as it does once written to disk; no extra round trip is needed (webview
+ * messages cross a JSON boundary anyway, and the document is parsed JSON).
+ * The tests pin the NaN/undefined case. Used where two
  * notebooks must be equal as documents: a file's own key order (for example
  * output before content, or extra fields after output) must not make a
  * snapshot "differ" from the document it was taken from.
@@ -24,7 +27,7 @@ function canonicalJson(value: unknown): string {
     }
     return node;
   };
-  return JSON.stringify(sortKeys(JSON.parse(JSON.stringify(value) ?? 'null')));
+  return JSON.stringify(sortKeys(value)) ?? 'undefined';
 }
 
 export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvider {

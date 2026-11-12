@@ -1165,6 +1165,59 @@ test('host rejects a non-structural save without a valid output change list', as
   }
 });
 
+test('structural check treats NaN and undefined in the base as the null and absent fields on disk', async () => {
+  // The document on disk holds what JSON.stringify wrote: NaN became null,
+  // undefined fields are gone. A base still holding NaN/undefined is the same document.
+  const disk = fixture(); disk.cells[1].output = { columns: ['v'], rows: [[null]], rowCount: 1, executionTime: null as any };
+  const h = await harness(disk), a = await h.panel();
+  const base = copy(disk);
+  base.cells[1].output!.rows = [[NaN]];
+  base.cells[1].output!.executionTime = NaN;
+  (base.cells[0] as any).variables = undefined;
+  const added = copy(disk); added.cells.push({ type: 'sql', content: 'added' });
+  await a.send({ command: 'save', notebook: added, base, structural: true, saveId: 1 });
+  assert.notEqual(a.messages.at(-1)?.command, 'saveFailed');
+  assert.equal(h.read().cells.length, 3);
+});
+
+test('recovery capture copies a result only if it is not saved, even while a local delete shifts indexes', t => {
+  const dom = new JSDOM('<section id="recovered-drafts"><div id="recovered-drafts-list"></div></section>');
+  t.after(() => dom.window.close());
+  const isolated = runInNewContext(`(${createNotebookRecovery.toString()})`) as typeof createNotebookRecovery;
+  let state: any;
+  const recovery = isolated({ getState: () => undefined, setState: value => { state = copy(value); },
+    postMessage: () => undefined }, dom.window.document, fixture());
+  const savedResult = { columns: ['v'], rows: [[1]], rowCount: 1 };
+  const base: ArcNotebook = { version: '1', cells: [
+    { type: 'sql', content: 'SELECT 0' }, { type: 'sql', content: 'SELECT 1', output: savedResult }] };
+  // Cell 0 deleted locally (structural save in flight): the saved result moved to index 0.
+  recovery.capture({ version: '1', cells: [base.cells[1]] }, base, []);
+  assert.equal(state.draft.notebook.cells[0].output, undefined);
+  // A genuinely new result is still carried.
+  const fresh = { columns: ['v'], rows: [[2]], rowCount: 1 };
+  recovery.capture({ version: '1', cells: [{ ...base.cells[1], output: fresh }] }, base, []);
+  assert.deepEqual(state.draft.notebook.cells[0].output, fresh);
+});
+
+test('a carried result that was written in another key order does not show a recovery card', t => {
+  const dom = new JSDOM('<section id="recovered-drafts"><div id="recovered-drafts-list"></div></section>');
+  t.after(() => dom.window.close());
+  const isolated = runInNewContext(`(${createNotebookRecovery.toString()})`) as typeof createNotebookRecovery;
+  const output = { columns: ['v'], rows: [[7]], rowCount: 1 };
+  // The draft carried the result (its ack never arrived before the rebuild)...
+  const draft = {
+    notebook: { version: '1', cells: [{ type: 'sql', content: 'SELECT 7', output }] },
+    base: { version: '1', cells: [{ type: 'sql', content: 'SELECT 7' }] },
+    variableRows: []
+  } as any;
+  // ...but it was written: the document holds it, with the file's own key order.
+  const current = JSON.parse('{"cells":[{"output":{"rowCount":1,"rows":[[7]],"columns":["v"]},"content":"SELECT 7","type":"sql"}],"version":"1"}');
+  let state: any;
+  isolated({ getState: () => undefined, setState: value => { state = copy(value); }, postMessage: () => undefined },
+    dom.window.document, current, { revision: 1, sessionId: 'old', draft, recoveries: [] }, 'new');
+  assert.equal(state.recoveries.length, 0);
+});
+
 test('focus readiness with a pre-sync version re-sends the document instead of rebuilding the panel', async t => {
   const b = await browser(); t.after(() => b.dom.window.close());
   const sibling = await b.host.panel();
