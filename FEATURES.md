@@ -121,16 +121,16 @@ Results appear in a dedicated webview panel with:
 **Export Results:**
 1. Click **Export CSV** or **Export JSON** to write every row of the result, not only the 1000 rows in the table, or **Copy as Markdown** to copy the rows shown
 2. Select save location
-3. File is saved with formatted data. Above 1000 rows a progress notification shows the rows written and can cancel the export; a cancelled or failed export removes the file it was writing, including a file it was replacing
+3. File is saved with formatted data. Above 1000 rows a progress notification shows the rows written and can cancel the export. A cancelled or failed export removes a file it created and leaves a file it was replacing empty (a symlink, FIFO or device is never removed)
 
 **Export row limit:**
-- `arc.export.maxRows` (default `0` = every row) caps the rows written; `1000` exports what the table shows, as older versions did
+- `arc.export.maxRows` (default `0` = every row) caps the rows written; `1000` exports the rows the table shows, the same rows older versions exported
 - `arc.export.promptForRowCount` (default off) asks on each export: all rows, the `arc.export.maxRows` limit, or a custom number
 - When a limit cuts the export, the message says `Exported N of M rows`
 
 **Export notes:**
-- The extension keeps the result on screen so it can export it (about 150 MB for 1M rows of 6 columns). It is released when the next query starts or the panel closes; after a failed query, run the query again to export the table still shown
-- With `arc.resultFormat` set to `arrow`, only the first 100,000 rows of a result are kept; exporting a larger one warns and suggests `json`
+- The extension keeps the result on screen so it can export it (about 150 MB for 1M rows of 6 columns). It is released when the panel closes, and a result of more than 1,000 rows also when the next query starts; after a failed query, run the query again to export such a table. A result of up to 1,000 rows stays exportable
+- With `arc.resultFormat` set to `arrow`, only the first 100,000 rows of a result are kept; exporting all of a larger one warns and suggests `json`. An Arrow result with list or struct columns keeps the whole Arrow response in memory (those cells point into it), not only the rows kept
 - Saving to a non-local file system (a virtual workspace) builds the whole file in memory before writing it
 
 **Chart Visualization:**

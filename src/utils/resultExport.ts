@@ -48,9 +48,9 @@ export function normalizeCell(value: unknown): unknown {
       return json.includes('"__proto__"') ? JSON.parse(json, dropProto) : JSON.parse(json);
     }
     case 'bigint':
-      // Not produced by the parsers (top-level Int64 is converted); behave
-      // like the old JSON embed, which threw.
-      return JSON.parse(JSON.stringify(value));
+      // Not produced by the parsers (top-level Int64 is converted). The old
+      // JSON embed threw on it; throw the same error on purpose.
+      throw new TypeError('Do not know how to serialize a BigInt');
     default:
       // undefined, function, symbol: JSON writes null inside an array.
       return null;
@@ -152,22 +152,42 @@ export const NEVER_CANCELLED: ExportControl = {
 const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
 
 /**
- * Stream the chunks to a local file, opened with truncate like
- * `workspace.fs.writeFile` (a symlink is followed, the file keeps its mode).
- * Between chunks the event loop gets a turn, and a full stream buffer waits
- * for 'drain'. On cancel or error the partial file is removed, which also
- * removes a file the export was overwriting. Returns false when cancelled.
+ * Open the export target the way VS Code's disk provider writes a file
+ * (`workspace.fs.writeFile`): truncate in place, never replace. A symlink is
+ * followed and the file keeps its identity, mode and links. On Windows an
+ * existing file is truncated first and then opened `r+`, because opening a
+ * hidden file with `w` fails with EPERM (microsoft/vscode#931).
+ */
+export async function openForExport(
+  path: string, platform: string = process.platform
+): Promise<{ handle: fs.promises.FileHandle; existed: boolean }> {
+  const existed = await fs.promises.stat(path).then(() => true, () => false);
+  if (existed && platform === 'win32') {
+    try {
+      await fs.promises.truncate(path, 0);
+      return { handle: await fs.promises.open(path, 'r+'), existed };
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') { throw error; }
+      // Removed in the meantime: create it below.
+    }
+  }
+  return { handle: await fs.promises.open(path, 'w'), existed };
+}
+
+/**
+ * Stream the chunks to a local file opened by `openForExport`. Between
+ * chunks the event loop gets a turn, and a full stream buffer waits for
+ * 'drain'. On cancel or error a regular file the export created is removed,
+ * and a regular file that already existed is left empty (it was truncated
+ * when opened). Nothing else is touched: no symlink, FIFO or device is
+ * removed. Returns false when cancelled.
  */
 export async function writeChunksToFile(
   path: string, chunks: Iterable<ExportChunk>, control: ExportControl = NEVER_CANCELLED
 ): Promise<boolean> {
-  // Unlink the file the data went to, not a symlink pointing at it.
-  let target = path;
-  try { target = await fs.promises.realpath(path); } catch { /* new file */ }
-
   // Open first: a file that cannot be opened (for example a read-only one)
   // fails here, before anything was written or could be removed.
-  const handle = await fs.promises.open(path, 'w');
+  const { handle, existed } = await openForExport(path);
   const stream = handle.createWriteStream();
   let failure: Error | undefined;
   let closed = false;
@@ -175,25 +195,50 @@ export async function writeChunksToFile(
   stream.on('close', () => { closed = true; });
   const whenClosed = () => new Promise<void>(resolve => closed ? resolve() : stream.once('close', () => resolve()));
 
+  // What was opened, and where it really is (resolved after opening, so a
+  // dangling symlink resolves to the file the open just created).
+  let opened: fs.Stats | undefined;
+  let target = path;
+  try {
+    opened = await handle.stat();
+    target = await fs.promises.realpath(path);
+  } catch (error) {
+    failure ??= error instanceof Error ? error : new Error(String(error));
+  }
+
   // Wait until the buffer drains, the stream fails or the export is cancelled.
   const drained = () => new Promise<void>(resolve => {
+    let settled = false;
+    let cancel: { dispose(): void } | undefined;
     const done = () => {
+      if (settled) { return; }
+      settled = true;
       stream.off('drain', done); stream.off('error', done); stream.off('close', done);
-      cancel.dispose();
+      cancel?.dispose();
       resolve();
     };
-    const cancel = control.onCancel(done);
     stream.on('drain', done); stream.on('error', done); stream.on('close', done);
+    cancel = control.onCancel(done);
+    if (settled) { cancel.dispose(); }
   });
 
+  // Close, then clean up; returns a description of a cleanup failure.
   const abandon = async (): Promise<string | undefined> => {
     stream.destroy();
     await whenClosed();
+    if (!opened || !opened.isFile()) { return undefined; }
+    const action = !existed && opened.nlink === 1 ? 'removed' : 'emptied';
     try {
-      await fs.promises.unlink(target);
+      const now = await fs.promises.lstat(target);
+      if (!now.isFile() || now.ino !== opened.ino || now.dev !== opened.dev) { return undefined; }
+      if (action === 'removed') {
+        await fs.promises.unlink(target);
+      } else {
+        await fs.promises.truncate(target, 0);
+      }
       return undefined;
     } catch (error: any) {
-      return error?.code === 'ENOENT' ? undefined : String(error?.message ?? error);
+      return error?.code === 'ENOENT' ? undefined : `could not be ${action}: ${String(error?.message ?? error)}`;
     }
   };
 
@@ -209,6 +254,8 @@ export async function writeChunksToFile(
       control.onProgress?.(chunk.rows);
       await yieldToEventLoop();
     }
+    // A cancel that arrives after the last chunk still wins: the file is
+    // cleaned up even though it is complete.
     if (!cancelled && control.isCancelled()) { cancelled = true; }
     if (!cancelled) {
       stream.end();
@@ -218,15 +265,15 @@ export async function writeChunksToFile(
     }
   } catch (error) {
     const original = error instanceof Error ? error : new Error(String(error));
-    const unlinkError = await abandon();
-    if (unlinkError) {
-      original.message += ` (the partial file could not be removed: ${unlinkError})`;
+    const cleanupError = await abandon();
+    if (cleanupError) {
+      original.message += ` (the partial file ${cleanupError})`;
     }
     throw original;
   }
-  const unlinkError = await abandon();
-  if (unlinkError) {
-    throw new Error(`Export cancelled, but the partial file could not be removed: ${unlinkError}`);
+  const cleanupError = await abandon();
+  if (cleanupError) {
+    throw new Error(`Export cancelled, but the partial file ${cleanupError}`);
   }
   return false;
 }

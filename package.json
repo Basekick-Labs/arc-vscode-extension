@@ -336,7 +336,7 @@
         "arc.maxResults": {
           "type": "number",
           "default": 1000,
-          "description": "Maximum number of results to display"
+          "description": "Not used yet: the results table always shows the first 1000 rows. It does not limit exports (see arc.export.maxRows)."
         },
         "arc.export.maxRows": {
           "type": "integer",
@@ -356,7 +356,7 @@
             "arrow"
           ],
           "default": "json",
-          "description": "Default result format for queries"
+          "description": "Default result format for queries. Arrow results keep only the first 100,000 rows of a result."
         },
         "arc.telemetry.enabled": {
           "type": "boolean",

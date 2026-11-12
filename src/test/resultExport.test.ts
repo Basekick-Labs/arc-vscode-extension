@@ -4,9 +4,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { spawn } from 'node:child_process';
+import { Writable } from 'node:stream';
 import { tableFromIPC, tableToIPC, Table, vectorFromArray, List, Struct, Field, Int32, Utf8 } from 'apache-arrow';
 import {
-  CHUNK_SIZE, collectChunks, encodeCsv, encodeJson, ExportChunk, ExportControl, normalizeCell, writeChunksToFile
+  CHUNK_SIZE, collectChunks, encodeCsv, encodeJson, ExportChunk, ExportControl, normalizeCell, openForExport, writeChunksToFile
 } from '../utils/resultExport';
 
 // The converters as they were on main before the export moved to the host
@@ -220,4 +222,176 @@ test('collectChunks returns one buffer, or undefined when cancelled', async () =
   const buffer = await collectChunks(encodeJson(columns, rows, Infinity));
   assert.deepEqual(buffer, Buffer.from(oldJson(columns, viaWebview(rows)), 'utf-8'));
   assert.equal(await collectChunks(encodeCsv(columns, rowsOf(20_000), Infinity), control(1)), undefined);
+});
+
+// Large enough to need several chunks, so cancelling after two leaves a partial file.
+const bigRows = Array.from({ length: 50_000 }, (_, i) => [i, 'x'.repeat(20)]);
+const cancelPartWay = (file: string) => writeChunksToFile(file, encodeCsv(['i', 's'], bigRows, Infinity), control(2));
+const posix = process.platform !== 'win32';
+
+test('cancel over an existing file empties it in place instead of removing it', async () => {
+  const dir = tmp(), file = path.join(dir, 'out.csv');
+  fs.writeFileSync(file, 'previous export');
+  fs.chmodSync(file, 0o600);
+  const before = fs.statSync(file);
+  assert.equal(await cancelPartWay(file), false);
+  const after = fs.statSync(file);
+  assert.equal(after.size, 0);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mode & 0o777, 0o600);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('cancel through a symlink to an existing file keeps the link and empties the target', { skip: !posix }, async () => {
+  const dir = tmp(), other = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-export-other-'));
+  const real = path.join(other, 'real.csv'), link = path.join(dir, 'link.csv');
+  fs.writeFileSync(real, 'keep the file');
+  fs.symlinkSync(real, link);
+  assert.equal(await cancelPartWay(link), false);
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(fs.statSync(real).size, 0);
+  fs.rmSync(dir, { recursive: true }); fs.rmSync(other, { recursive: true });
+});
+
+test('cancel through a dangling symlink removes the file the export created, not the link', { skip: !posix }, async () => {
+  const dir = tmp(), real = path.join(dir, 'created.csv'), link = path.join(dir, 'link.csv');
+  fs.symlinkSync(real, link);
+  assert.equal(await cancelPartWay(link), false);
+  assert.equal(fs.existsSync(real), false, 'no partial file left at the target');
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'the link is not removed');
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('cancel on a hardlinked file empties it and keeps both names', { skip: !posix }, async () => {
+  const dir = tmp(), a = path.join(dir, 'a.csv'), b = path.join(dir, 'b.csv');
+  fs.writeFileSync(a, 'shared');
+  fs.linkSync(a, b);
+  assert.equal(await cancelPartWay(a), false);
+  assert.equal(fs.statSync(a).size, 0);
+  assert.equal(fs.statSync(b).size, 0);
+  assert.equal(fs.statSync(a).nlink, 2);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('cancel on a FIFO leaves the FIFO in place', { skip: !posix }, async () => {
+  const dir = tmp(), fifo = path.join(dir, 'pipe.csv');
+  const made = spawn('mkfifo', [fifo]);
+  await new Promise(resolve => made.on('close', resolve));
+  const reader = spawn('cat', [fifo], { stdio: ['ignore', 'ignore', 'ignore'] });
+  assert.equal(await cancelPartWay(fifo), false);
+  assert.ok(fs.lstatSync(fifo).isFIFO());
+  reader.kill();
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('an error writing to a device does not try to remove the device', { skip: !fs.existsSync('/dev/full') }, async () => {
+  await assert.rejects(writeChunksToFile('/dev/full', encodeCsv(['i', 's'], bigRows, Infinity)),
+    (error: Error) => /ENOSPC/.test(error.message) && !/could not be/.test(error.message));
+});
+
+test('on Windows an existing file is truncated and opened r+, keeping its identity', async () => {
+  const dir = tmp(), file = path.join(dir, 'hidden.csv');
+  fs.writeFileSync(file, 'old contents');
+  const before = fs.statSync(file);
+  const flags: string[] = [];
+  const { handle, existed } = await withFsPromises({
+    open: original => (p: string, flag: string) => { flags.push(flag); return original(p, flag); }
+  }, () => openForExport(file, 'win32'));
+  assert.equal(existed, true);
+  // VS Code's disk provider does the same: 'w' fails on hidden files (EPERM).
+  assert.deepEqual(flags, ['r+']);
+  await handle.write('new');
+  await handle.close();
+  assert.equal(fs.readFileSync(file, 'utf-8'), 'new');
+  assert.equal(fs.statSync(file).ino, before.ino);
+  const created = path.join(dir, 'new.csv');
+  const opened = await openForExport(created, 'win32');
+  assert.equal(opened.existed, false);
+  await opened.handle.close();
+  assert.ok(fs.existsSync(created));
+  fs.rmSync(dir, { recursive: true });
+});
+
+/** Replace fs.promises methods for the duration of a test. */
+async function withFsPromises<T>(patch: Record<string, (original: any) => any>, run: () => Promise<T>): Promise<T> {
+  const promises = fs.promises as any;
+  const originals: Record<string, any> = {};
+  for (const [name, wrap] of Object.entries(patch)) { originals[name] = promises[name]; promises[name] = wrap(originals[name]); }
+  try { return await run(); } finally { Object.assign(promises, originals); }
+}
+
+test('a full stream buffer waits for drain before the next write', async () => {
+  const dir = tmp(), file = path.join(dir, 'out.csv');
+  const pendingAtWrite: number[] = [];
+  await withFsPromises({
+    open: original => async (...args: any[]) => {
+      const handle = await original(...args);
+      // A slow sink: each write completes 15 ms later, after the event loop turns.
+      handle.createWriteStream = () => {
+        const stream = new Writable({ highWaterMark: 1,
+          write(chunk, _encoding, callback) { setTimeout(() => handle.write(chunk).then(() => callback(), callback), 15); },
+          final(callback) { callback(); },
+          destroy(error, callback) { handle.close().then(() => callback(error), callback); } });
+        const write = stream.write.bind(stream);
+        stream.write = ((chunk: any, ...rest: any[]) => { pendingAtWrite.push(stream.writableLength); return write(chunk, ...rest); }) as any;
+        return stream;
+      };
+      return handle;
+    }
+  }, () => writeChunksToFile(file, encodeCsv(['i', 's'], bigRows, Infinity)));
+  assert.ok(pendingAtWrite.length > 3);
+  assert.deepEqual(pendingAtWrite.filter(n => n > 0), [], 'no write while the previous one is pending');
+  assert.equal(fs.readFileSync(file, 'utf-8'), oldCsv(['i', 's'], bigRows));
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('the event loop gets a turn between chunks', async () => {
+  const dir = tmp(), file = path.join(dir, 'out.csv');
+  // Chunks far below the stream's high-water mark, so no drain wait happens.
+  function* chunks(): Generator<ExportChunk> {
+    for (let i = 1; i <= 3; i++) { yield { text: `row ${i}\n`, rows: i }; }
+  }
+  let progressed = 0, seenByOtherWork = -1;
+  const ctl: ExportControl = { isCancelled: () => false, onCancel: () => ({ dispose() {} }), onProgress: rows => {
+    progressed = rows;
+    // Other work queued after the first chunk must run before the second.
+    if (rows === 1) { setImmediate(() => { seenByOtherWork = progressed; }); }
+  } };
+  assert.equal(await writeChunksToFile(file, chunks(), ctl), true);
+  assert.equal(seenByOtherWork, 1, 'other work ran after the first chunk, before the second');
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('the file is closed before it is removed', async () => {
+  const dir = tmp(), file = path.join(dir, 'out.csv');
+  let stream: any;
+  const closedAtCleanup: boolean[] = [];
+  await withFsPromises({
+    open: original => async (...args: any[]) => {
+      const handle = await original(...args);
+      const create = handle.createWriteStream.bind(handle);
+      handle.createWriteStream = (...rest: any[]) => (stream = create(...rest));
+      return handle;
+    },
+    lstat: original => async (...args: any[]) => { closedAtCleanup.push(stream.closed); return original(...args); },
+    unlink: original => async (...args: any[]) => { closedAtCleanup.push(stream.closed); return original(...args); }
+  }, () => cancelPartWay(file));
+  // Windows cannot remove an open file; Linux can, so check the stream itself.
+  assert.deepEqual(closedAtCleanup, [true, true]);
+  assert.equal(fs.existsSync(file), false);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('a control that reports cancellation synchronously does not crash the drain wait', async () => {
+  const dir = tmp(), file = path.join(dir, 'out.csv');
+  let cancelled = false;
+  const ctl: ExportControl = { isCancelled: () => cancelled,
+    onCancel: listener => { cancelled = true; listener(); return { dispose() {} }; } };
+  function* chunks(): Generator<ExportChunk> {
+    yield { text: 'x'.repeat(1024 * 1024), rows: 1 };
+    yield { text: 'y', rows: 2 };
+  }
+  assert.equal(await writeChunksToFile(file, chunks(), ctl), false);
+  assert.equal(fs.existsSync(file), false);
+  fs.rmSync(dir, { recursive: true });
 });

@@ -85,13 +85,17 @@ export class QueryResultsView {
   }
 
   /**
-   * Drop the held result before a new query runs, so a large previous result
-   * and the new response are never in memory together. The table stays on
-   * screen; exporting it asks for the query to be run again.
+   * Drop a large held result before a new query runs, so it and the new
+   * response are never in memory together (an export still writing keeps
+   * its own reference until it finishes). A result of at most
+   * DISPLAY_ROW_CAP rows is kept, so the table on screen stays exportable
+   * after a failed query, as before. A larger one's table stays on screen,
+   * and exporting it asks for the query to be run again.
    */
   public static releaseResult(): void {
-    if (QueryResultsView.currentPanel) {
-      QueryResultsView.currentPanel.result = undefined;
+    const panel = QueryResultsView.currentPanel;
+    if (panel?.result && panel.result.rows.length > DISPLAY_ROW_CAP) {
+      panel.result = undefined;
     }
   }
 
@@ -488,13 +492,20 @@ export class QueryResultsView {
         : 'These results are no longer held; run the query again to export them.');
       return;
     }
-    if (this.exporting) {
-      vscode.window.showInformationMessage('An export is already running.');
+    const refuseIfRunning = (): boolean => {
+      if (this.exporting) {
+        vscode.window.showInformationMessage('An export is already running.');
+      }
+      return this.exporting;
+    };
+    if (refuseIfRunning()) {
       return;
     }
-    this.exporting = true;
+    // The prompt and the save dialog do not count as running: a click in the
+    // page that closes the prompt starts a new export instead of being refused.
+    let started = false;
     try {
-      const count = await this.chooseRowCount(snapshot.rows.length);
+      const count = await this.chooseRowCount(snapshot);
       if (count === undefined) {
         return;
       }
@@ -504,9 +515,10 @@ export class QueryResultsView {
         filters: csv ? { 'CSV Files': ['csv'] } : { 'JSON Files': ['json'] },
         defaultUri: vscode.Uri.file(csv ? 'query_results.csv' : 'query_results.json')
       });
-      if (!uri) {
+      if (!uri || refuseIfRunning()) {
         return;
       }
+      this.exporting = started = true;
 
       const chunks = (): Iterable<ExportChunk> => csv
         ? encodeCsv(snapshot.columns, snapshot.rows, count)
@@ -546,7 +558,9 @@ export class QueryResultsView {
       const message = error instanceof Error ? error.message : 'Unknown error';
       vscode.window.showErrorMessage(`Export failed: ${message}`);
     } finally {
-      this.exporting = false;
+      if (started) {
+        this.exporting = false;
+      }
     }
   }
 
@@ -555,7 +569,8 @@ export class QueryResultsView {
    * user's choice when `arc.export.promptForRowCount` is on. Undefined when
    * the prompt is dismissed.
    */
-  private async chooseRowCount(held: number): Promise<number | undefined> {
+  private async chooseRowCount(result: ArcQueryResult): Promise<number | undefined> {
+    const held = result.rows.length;
     const config = vscode.workspace.getConfiguration('arc');
     const setting = config.get<unknown>('export.maxRows', 0);
     // Anything but a positive integer means "no limit"; the settings schema
@@ -566,7 +581,9 @@ export class QueryResultsView {
       return fromSetting;
     }
 
-    const items: Array<vscode.QuickPickItem & { count?: number }> = [{ label: `All ${held} rows`, count: held }];
+    const items: Array<vscode.QuickPickItem & { count?: number }> = [{ label: `All ${held} rows`, count: held,
+      // Only the Arrow parser holds fewer rows than the server returned.
+      description: result.rowCount > held ? `Arrow keeps the first ${held} of ${result.rowCount} rows` : undefined }];
     if (maxRows > 0 && maxRows < held) {
       items.push({ label: `First ${maxRows} rows`, description: 'arc.export.maxRows', count: maxRows });
     }
@@ -588,13 +605,15 @@ export class QueryResultsView {
 
   private reportExport(result: ArcQueryResult, written: number, fsPath: string): void {
     const held = result.rows.length;
-    if (result.rowCount > held) {
-      // Only the Arrow parser holds fewer rows than the server returned.
+    // rowCount equals the rows held, except for an Arrow result above the
+    // parser's cap. Warn only when that cap is what cut the export.
+    const total = Math.max(result.rowCount, held);
+    if (written === held && total > held) {
       vscode.window.showWarningMessage(
-        `Exported ${written} of ${result.rowCount} rows to ${fsPath}. Arrow results keep only the first ${held} rows; set arc.resultFormat to "json" to export them all.`
+        `Exported ${written} of ${total} rows to ${fsPath}. Arrow results keep only the first ${held} rows; set arc.resultFormat to "json" to export them all.`
       );
-    } else if (written < held) {
-      vscode.window.showInformationMessage(`Exported ${written} of ${held} rows to ${fsPath}`);
+    } else if (written < total) {
+      vscode.window.showInformationMessage(`Exported ${written} of ${total} rows to ${fsPath}`);
     } else {
       vscode.window.showInformationMessage(`Exported ${written} rows to ${fsPath}`);
     }

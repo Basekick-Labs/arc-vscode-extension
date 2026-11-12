@@ -24,6 +24,7 @@ function reset() {
     progress: [] as any[],
     cancelAfterReports: Infinity,
     fsWrites: [] as Array<{ uri: any; contents: Buffer }>,
+    fsWriteGate: undefined as Promise<void> | undefined,
     clipboard: undefined as string | undefined,
     panel: undefined as any,
     receiver: undefined as ((message: any) => unknown) | undefined,
@@ -70,7 +71,7 @@ const vscode = {
   },
   workspace: {
     getConfiguration: () => ({ get: (key: string, fallback: unknown) => key in state.config ? state.config[key] : fallback }),
-    fs: { writeFile: async (uri: any, contents: Buffer) => { state.fsWrites.push({ uri, contents }); } }
+    fs: { writeFile: async (uri: any, contents: Buffer) => { await state.fsWriteGate; state.fsWrites.push({ uri, contents }); } }
   },
   env: { clipboard: { writeText: async (text: string) => { state.clipboard = text; } } }
 };
@@ -104,11 +105,16 @@ const tmpFile = (name: string) => {
 after(() => tmpDirs.forEach(dir => fs.rmSync(dir, { recursive: true, force: true })));
 const generation = () => Number(/const generation = (\d+);/.exec(state.panel.webview.html)![1]);
 
+/** Let pending prompts and dialogs resolve, then wait for any write. */
+async function settle() {
+  for (let i = 0; i < 20; i++) { await tick(); }
+  while (current()?.exporting) { await tick(); }
+}
+
 /** Send a message as the webview would and wait for the export to finish. */
 async function send(message: any) {
   state.receiver!(copy(message));
-  await tick();
-  while (current()?.exporting) { await tick(); }
+  await settle();
 }
 
 /** Load the page in JSDOM and click a button; returns what the page posted. */
@@ -242,17 +248,29 @@ test('the prompt never appears when the setting is off', async () => {
   assert.deepEqual([state.info, state.warnings, state.errors], [[], [], []]);
 });
 
-test('an Arrow result above the parser cap warns, even with a limit set', async () => {
+test('an Arrow result above the parser cap warns only when the cap cut the export', async () => {
   resultsView.show(result(2500, 250_000), 'SELECT 1');
   const file = tmpFile('out.csv');
   state.save = fileUri(file);
   await send({ command: 'exportCSV', generation: generation() });
   assert.deepEqual(state.warnings, [`Exported 2500 of 250000 rows to ${file}. Arrow results keep only the first 2500 rows; set arc.resultFormat to "json" to export them all.`]);
   state.warnings = [];
+  // A user limit cut it, not the Arrow cap: information, against the server's total.
   state.config['export.maxRows'] = 10;
   await send({ command: 'exportCSV', generation: generation() });
-  assert.deepEqual(state.warnings, [`Exported 10 of 250000 rows to ${file}. Arrow results keep only the first 2500 rows; set arc.resultFormat to "json" to export them all.`]);
-  assert.deepEqual(state.info, []);
+  assert.deepEqual(state.warnings, []);
+  assert.deepEqual(state.info, [`Exported 10 of 250000 rows to ${file}`]);
+});
+
+test('the prompt says when the Arrow format capped the rows held', async () => {
+  resultsView.show(result(2500, 250_000), 'SELECT 1');
+  state.config['export.promptForRowCount'] = true;
+  state.pick = () => undefined;
+  await send({ command: 'exportCSV', generation: generation() });
+  assert.deepEqual(state.quickPicks[0][0], { label: 'All 2500 rows', count: 2500, description: 'Arrow keeps the first 2500 of 250000 rows' });
+  resultsView.show(result(2500), 'SELECT 1');
+  await send({ command: 'exportCSV', generation: generation() });
+  assert.equal(state.quickPicks[1][0].description, undefined);
 });
 
 test('a click from an older page exports nothing', async () => {
@@ -264,51 +282,97 @@ test('a click from an older page exports nothing', async () => {
   assert.deepEqual(state.warnings, ['The results changed; export again.']);
 });
 
-test('a page that failed to build keeps the previous result exportable', async () => {
-  resultsView.show(result(1500), 'SELECT 1');
-  const before = generation(), html = state.panel.webview.html;
-  // Nested BigInt cannot be embedded in the page; the view throws as before.
-  assert.throws(() => resultsView.show({ columns: ['v'], rows: [[{ x: 1n }]], rowCount: 1 }, 'SELECT 2'), /BigInt/);
-  assert.equal(state.panel.webview.html, html);
-  const file = tmpFile('out.csv');
-  state.save = fileUri(file);
-  await send({ command: 'exportCSV', generation: before });
-  assert.equal(csvRows(file), 1500);
-});
+const commandsWith = (client: any) => new arcCommands({ isConnected: () => true, getActiveClient: () => client }, {}, {});
 
-test('exporting after the result was released asks for the query to run again', async () => {
-  resultsView.show(result(5), 'SELECT 1');
-  resultsView.releaseResult();
+for (const held of [5, 1000]) {
+  test(`a ${held}-row table stays exportable after a failed query, as before`, async () => {
+    resultsView.show(result(held), 'SELECT 1');
+    let during: unknown;
+    await commandsWith({ executeQuery: async () => { during = current().result; throw new Error('syntax error'); } }).executeQuery();
+    assert.equal((during as any)?.rows.length, held, 'not released while the query runs');
+    assert.deepEqual(state.errors, ['Query failed: syntax error']);
+    const file = tmpFile('out.csv');
+    state.save = fileUri(file);
+    await send({ command: 'exportCSV', generation: generation() });
+    assert.equal(csvRows(file), held);
+  });
+}
+
+test('a table over 1000 rows is released when a query starts; a failed query asks to run it again', async () => {
+  resultsView.show(result(1001), 'SELECT 1');
+  const held: unknown[] = [];
+  await commandsWith({ executeQuery: async () => { held.push(current().result); throw new Error('syntax error'); } }).executeQuery();
+  assert.deepEqual(held, [undefined]);
   await send({ command: 'exportCSV', generation: generation() });
   assert.equal(state.saveDialogs, 0);
   assert.deepEqual(state.warnings, ['These results are no longer held; run the query again to export them.']);
 });
 
-test('running a query releases the held result before fetching the next one', async () => {
-  resultsView.show(result(5), 'SELECT 1');
+test('a successful query over a large table holds only the new result', async () => {
+  resultsView.show(result(2500), 'SELECT 1');
   const held: unknown[] = [];
-  const client = { executeQuery: async () => { held.push(current().result); return result(3); } };
-  const commands = new arcCommands({ isConnected: () => true, getActiveClient: () => client }, {}, {});
-  await commands.executeQuery();
+  await commandsWith({ executeQuery: async () => { held.push(current().result); return result(3); } }).executeQuery();
   assert.deepEqual(held, [undefined]);
   assert.equal(current().result.rows.length, 3);
   assert.deepEqual(state.errors, []);
 });
 
-test('a second click while an export is open is refused', async () => {
+test('previewing a table releases a large held result before fetching', async () => {
+  resultsView.show(result(2500), 'SELECT 1');
+  const held: unknown[] = [];
+  await commandsWith({ executeQuery: async () => { held.push(current().result); return result(10); } }).previewTableData({ label: 'cpu' });
+  assert.deepEqual(held, [undefined]);
+  assert.equal(current().result.rows.length, 10);
+});
+
+test('a page that fails to build after a query leaves a small previous table exportable', async () => {
   resultsView.show(result(5), 'SELECT 1');
-  let answer!: (value: any) => void;
-  state.save = () => new Promise(resolve => { answer = resolve; });
+  const before = generation(), html = state.panel.webview.html;
+  // Nested BigInt cannot be embedded in the page; the view throws as on main.
+  await commandsWith({ executeQuery: async () => ({ columns: ['v'], rows: [[{ x: 1n }]], rowCount: 1 }) }).executeQuery();
+  assert.equal(state.errors.length, 1);
+  assert.match(state.errors[0], /^Query failed: .*BigInt/);
+  assert.equal(state.panel.webview.html, html);
+  const file = tmpFile('out.csv');
+  state.save = fileUri(file);
+  await send({ command: 'exportCSV', generation: before });
+  assert.equal(csvRows(file), 5);
+});
+
+test('a click while an export is writing is refused', async () => {
+  resultsView.show(result(5), 'SELECT 1');
+  let release!: () => void;
+  state.fsWriteGate = new Promise<void>(resolve => { release = resolve; });
+  state.save = { scheme: 'vscode-remote', fsPath: '/remote/out.csv', path: '/remote/out.csv' };
   state.receiver!({ command: 'exportCSV', generation: generation() });
-  await tick();
+  while (!current().exporting) { await tick(); }
   state.receiver!({ command: 'exportJSON', generation: generation() });
   await tick();
   assert.deepEqual(state.info, ['An export is already running.']);
-  const file = tmpFile('out.csv');
-  answer(fileUri(file));
-  while (current().exporting) { await tick(); }
   assert.equal(state.saveDialogs, 1);
-  assert.equal(csvRows(file), 5);
+  release();
+  await settle();
+  assert.equal(state.fsWrites.length, 1);
+  assert.deepEqual(state.info, ['An export is already running.', 'Exported 5 rows to /remote/out.csv']);
+});
+
+test('a click while the row-count prompt is open starts that export instead of being refused', async () => {
+  resultsView.show(result(5), 'SELECT 1');
+  state.config['export.promptForRowCount'] = true;
+  let dismiss!: (value: any) => void;
+  state.pick = () => new Promise(resolve => { dismiss = resolve; });
+  state.receiver!({ command: 'exportCSV', generation: generation() });
+  await tick();
+  // The page click closes the first prompt (focus loss) and opens its own.
+  const file = tmpFile('out.json');
+  state.save = fileUri(file);
+  state.pick = (items: any[]) => items[0];
+  state.receiver!({ command: 'exportJSON', generation: generation() });
+  dismiss(undefined);
+  await settle();
+  assert.equal(state.quickPicks.length, 2);
+  assert.deepEqual(state.info, [`Exported 5 rows to ${file}`]);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf-8')).length, 5);
 });
 
 test('cancelling the progress removes the partial file and shows nothing', async () => {
