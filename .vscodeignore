@@ -14,3 +14,4 @@ out/test/**
 *.vsix
 .github/**
 .claude/**
+scripts/**

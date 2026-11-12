@@ -321,10 +321,24 @@ describe('ArcClient error messages', () => {
     const { arc, mock } = client();
     mock.onPost('/api/v1/write/msgpack').reply(400, body);
     await assert.rejects(
-      // A tag spelled `Time`: Arc rejects every letter case of the timestamp column.
-      () => arc.writeData('raw', [{ tags: Object.fromEntries([['Time', 'x']]), fields: { v: 1 }, timestamp: 1 }]),
+      // Use a valid tag so #21's client guard does not preempt this
+      // captured server-error fixture; this test exercises error passthrough.
+      () => arc.writeData('raw', [{ tags: { sensor: 'x' }, fields: { v: 1 }, timestamp: 1 }]),
       { message: body.error }
     );
+  });
+
+  it('rejects reserved timestamp tags and fields before any request', async () => {
+    const { arc, mock } = client();
+    for (const name of ['time', 'Time', 'TIME']) {
+      for (const location of ['tags', 'fields']) {
+        await assert.rejects(
+          () => arc.writeData('raw', [{ [location]: { [name]: 'x' }, timestamp: 1 }]),
+          { message: `Column "${name}" is reserved for timestamps and cannot be used as a tag or field` }
+        );
+      }
+    }
+    assert.equal(mock.history.post.length, 0);
   });
 
   it('keeps a handler\'s 404 message, and explains a missing route', async () => {
