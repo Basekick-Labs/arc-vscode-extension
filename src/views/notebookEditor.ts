@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../utils/connectionManager';
 import { ArcNotebook, ArcNotebookCell } from '../types/notebook';
 import { escapeHtml } from '../utils/sqlUtils';
-import { mergeSyncedNotebook, notebookValueText } from './notebookSync';
+import { mergeSyncedNotebook, notebookValueText, sameNotebookValue } from './notebookSync';
 import { createNotebookRecovery, NotebookDraft } from './notebookRecovery';
 
 export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvider {
@@ -121,7 +121,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             message.structural === true,
             webviewPanel,
             message.saveId,
-            message.sessionId
+            message.sessionId,
+            message.outputChanges
           );
           break;
         case 'executeCell':
@@ -258,7 +259,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     structural: boolean,
     sourcePanel: vscode.WebviewPanel,
     saveId: number,
-    sessionId: string
+    sessionId: string,
+    outputChanges?: unknown
   ): Promise<void> {
     const key = document.uri.toString();
     const previous = this.saves.get(key) ?? Promise.resolve();
@@ -266,7 +268,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
       // A structural/external edit can reorder same-type cells. Do not let
       // old-session queued writes run while the frozen draft is handed off.
       if (this.panelSessions.get(sourcePanel) !== sessionId || this.reloadingPanels.has(sourcePanel)) { return; }
-      await this.applyNotebookSave(document, notebook, base, structural, sourcePanel, saveId, sessionId);
+      await this.applyNotebookSave(document, notebook, base, structural, sourcePanel, saveId, sessionId, outputChanges);
     });
     this.saves.set(key, save);
     try {
@@ -283,7 +285,8 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     structural: boolean,
     sourcePanel: vscode.WebviewPanel,
     saveId: number,
-    sessionId: string
+    sessionId: string,
+    outputChanges?: unknown
   ): Promise<void> {
     const fail = (reason: string) => {
       sourcePanel.webview.postMessage({ command: 'saveFailed', saveId, sessionId });
@@ -292,6 +295,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     // Read at the front of the queue, never before awaiting an earlier save.
     // Malformed files must remain untouched (the #13 recovery guarantee).
     const current = this.parseNotebook(document.getText());
+    const baseVersion = document.version;
     if (!current || !this.isNotebook(base) || !this.isNotebook(notebook)) {
       fail('The notebook could not be read, so this save was not applied.');
       return;
@@ -309,7 +313,13 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
 
     // Each sender supplies its own base. On a same-field conflict its local
     // edit wins; unrelated changes already in the document are preserved.
-    const merged = structural ? notebook : mergeSyncedNotebook(base, notebook, current);
+    // Non-structural saves list the cells whose output the sender replaced
+    // (base then carries no outputs): outputs are merged by that list rather
+    // than by comparing megabytes of query results on every autosave.
+    const changes = !structural && Array.isArray(outputChanges) &&
+      outputChanges.every(index => Number.isInteger(index) && index >= 0 && index < notebook.cells.length)
+      ? outputChanges as number[] : undefined;
+    const merged = structural ? notebook : mergeSyncedNotebook(base, notebook, current, changes);
     const json = JSON.stringify(merged, null, 2);
     const normalized = this.normalize(json)!;
     const key = document.uri.toString();
@@ -348,20 +358,35 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     }
 
     // A no-op also needs an acknowledgment, or the sender stays in flight.
-    // Read back the document, rather than broadcasting a stale sender copy.
+    // Broadcast what was written (merged, or the unchanged document), not the
+    // sender's copy. Outputs travel only for the cells this write changed:
+    // every panel has applied every earlier broadcast in order (a panel that
+    // could not is rebuilt), so the rest are already in its last snapshot.
+    // The sender gets none: the changed outputs are the ones it just sent.
     if (!structural || !changed) {
-      const written = this.parseNotebook(document.getText());
-      if (!written) {
-        fail('The notebook changed to unreadable contents while saving.');
-        return;
-      }
+      const written = changed ? merged : current;
+      const delta = changed ? changes : [];
+      const strippedCells = written.cells.map(cell => {
+        const copy = { ...cell };
+        delete copy.output;
+        return copy;
+      });
       for (const panel of this.panels.get(key) ?? []) {
+        const isSource = panel === sourcePanel && this.panelSessions.get(panel) === sessionId;
+        const outputs: Record<number, { output?: ArcNotebookCell['output'] }> = {};
+        if (delta && !isSource) {
+          for (const index of delta) {
+            const output = written.cells[index].output;
+            outputs[index] = output === undefined ? {} : { output };
+          }
+        }
         panel.webview.postMessage({
           command: 'syncNotebook',
-          notebook: written,
+          notebook: delta ? { ...written, cells: strippedCells } : written,
+          delta: delta ? { baseVersion, changed: delta, outputs } : undefined,
           version: document.version,
           sessionId: this.panelSessions.get(panel),
-          saveId: panel === sourcePanel && this.panelSessions.get(panel) === sessionId ? saveId : undefined
+          saveId: isSource ? saveId : undefined
         });
       }
     }
@@ -838,10 +863,24 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const mergeSyncedNotebook = ${mergeSyncedNotebookSource};
+        const sameNotebookValue = ${sameNotebookValue.toString()};
         const notebookValueText = ${notebookValueText.toString()};
         let notebook = ${JSON.stringify(notebook).replace(/</g, '\\u003c')};
         const sessionId = '${sessionId}';
-        let lastSavedJson = JSON.stringify(notebook);
+        // Shallow copy: cells are copied, outputs are shared. Outputs are only
+        // ever replaced whole (updateCellOutput, merges), never mutated, so an
+        // unchanged output is the same object here and in the model, and the
+        // per-autosave checks below compare it in O(1).
+        function snapshotNotebook(source) {
+            const copy = { ...source, cells: source.cells.map(cell => ({ ...cell })) };
+            if (source.globalVariables) { copy.globalVariables = { ...source.globalVariables }; }
+            return copy;
+        }
+        function withoutOutputs(source) {
+            return { ...source, cells: source.cells.map(cell => { const copy = { ...cell }; delete copy.output; return copy; }) };
+        }
+        // Last document the host acknowledged to this panel (never mutated).
+        let lastSaved = snapshotNotebook(notebook);
         let lastVersion = ${document.version};
         let nextSaveId = 0;
         let inFlight = null;
@@ -862,7 +901,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                     value: row.querySelector('input[name="value"]').value
                 }))
                 : Object.entries(notebook.globalVariables || {}).map(([key, value]) => ({ key, value: notebookValueText(value) }));
-            recovery.capture(notebook, JSON.parse(lastSavedJson), variableRows);
+            recovery.capture(notebook, lastSaved, variableRows);
         }
 
         function setStructuralBusy(busy = true) {
@@ -1140,7 +1179,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
         document.addEventListener('focusout', (e) => {
             if (e.target.matches && e.target.matches('textarea[data-cell-index], .variable-row input')) {
                 if (autosaveTimer !== null) { flushAutosave(); }
-                setTimeout(() => syncNotebook(JSON.parse(lastSavedJson), lastVersion), 0);
+                setTimeout(() => syncNotebook(lastSaved, lastVersion), 0);
             }
         });
         window.addEventListener('blur', () => {
@@ -1155,13 +1194,19 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             // Only one save per panel can be unacknowledged. Further typing
             // stays local until the host returns the actual written snapshot.
             if (inFlight) { return; }
-            const json = JSON.stringify(notebook);
-            if (!structuralPending && json === lastSavedJson) { return; }
-            inFlight = { saveId: ++nextSaveId, notebook: JSON.parse(json), structural: structuralPending };
+            if (!structuralPending && sameNotebookValue(notebook, lastSaved)) { return; }
+            inFlight = { saveId: ++nextSaveId, notebook: snapshotNotebook(notebook), structural: structuralPending };
+            // A structural save is checked against the exact document, so it
+            // carries the full base. Otherwise outputs merge by the list of
+            // cells this panel replaced, and the base needs none.
+            const outputChanges = structuralPending ? undefined : inFlight.notebook.cells
+                .map((cell, index) => (lastSaved.cells[index] && cell.output === lastSaved.cells[index].output) ? -1 : index)
+                .filter(index => index !== -1);
             vscode.postMessage({
                 command: 'save',
                 notebook: inFlight.notebook,
-                base: JSON.parse(lastSavedJson),
+                base: structuralPending ? lastSaved : withoutOutputs(lastSaved),
+                outputChanges,
                 structural: structuralPending,
                 saveId: inFlight.saveId,
                 sessionId
@@ -1173,7 +1218,32 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             saveNotebook(true);
         }
 
-        function syncNotebook(nextNotebook, version, saveId) {
+        // A delta sync carries outputs only for the cells its write changed;
+        // the rest are taken (by reference) from lastSaved, which is exactly
+        // the document that write started from (delta.baseVersion).
+        function hydrate(nextNotebook, delta, acknowledged) {
+            if (!delta) { return nextNotebook; }
+            if (delta.baseVersion !== lastVersion || nextNotebook.cells.length !== lastSaved.cells.length) { return null; }
+            const changed = new Set(delta.changed);
+            for (let index = 0; index < nextNotebook.cells.length; index++) {
+                const cell = nextNotebook.cells[index];
+                let entry;
+                if (!changed.has(index)) {
+                    entry = { output: lastSaved.cells[index].output };
+                } else if (Object.prototype.hasOwnProperty.call(delta.outputs, index)) {
+                    entry = delta.outputs[index];
+                } else if (acknowledged) {
+                    entry = { output: inFlight.notebook.cells[index].output };
+                } else {
+                    return null;
+                }
+                if (entry.output === undefined) { delete cell.output; }
+                else { cell.output = entry.output; }
+            }
+            return nextNotebook;
+        }
+
+        function syncNotebook(nextNotebook, version, saveId, delta) {
             if (recovery.resuming) { return; }
             if (version < lastVersion) { return; }
             const acknowledged = inFlight && saveId === inFlight.saveId;
@@ -1185,7 +1255,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                     // The structural model still contains the submitted cell
                     // snapshot. Do not bless it with a newer base: the host
                     // must reject it if a sibling changed that snapshot.
-                    lastSavedJson = JSON.stringify(inFlight.notebook);
+                    lastSaved = inFlight.notebook;
                     lastVersion = version;
                     inFlight = null;
                     saveNotebook(structuralPending);
@@ -1193,10 +1263,18 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                 return;
             }
 
+            nextNotebook = hydrate(nextNotebook, delta, acknowledged);
+            if (!nextNotebook) {
+                // A delta that does not start from this panel's snapshot
+                // cannot be applied; rebuild from the document (the reload
+                // handshake keeps any unsent draft).
+                vscode.postMessage({ command: 'reloadNotebook', sessionId });
+                return;
+            }
             const previousNotebook = notebook;
-            const savedNotebook = acknowledged ? inFlight.notebook : JSON.parse(lastSavedJson);
+            const savedNotebook = acknowledged ? inFlight.notebook : lastSaved;
             notebook = mergeSyncedNotebook(savedNotebook, previousNotebook, nextNotebook);
-            lastSavedJson = JSON.stringify(nextNotebook);
+            lastSaved = nextNotebook;
             lastVersion = version;
             if (acknowledged) { inFlight = null; }
             notebook.cells.forEach((cell, index) => {
@@ -1230,7 +1308,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                     textarea.scrollTop = scrollTop;
                     textarea.scrollLeft = scrollLeft;
                 }
-                if (JSON.stringify(previousCell.output) !== JSON.stringify(cell.output)) {
+                if (previousCell.output !== cell.output && !sameNotebookValue(previousCell.output, cell.output)) {
                     renderCellOutput(index);
                 }
             });
@@ -1238,7 +1316,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
             setStructuralBusy(!viewReady || preparingReload || structuralPending || !!inFlight?.structural);
             captureRecoveryState();
             if (structuralPending) { saveNotebook(true); }
-            else if (JSON.stringify(notebook) !== lastSavedJson) { scheduleAutosave(); }
+            else if (!sameNotebookValue(notebook, lastSaved)) { scheduleAutosave(); }
         }
 
         // Listen for messages from extension
@@ -1262,7 +1340,7 @@ export class ArcNotebookEditorProvider implements vscode.CustomTextEditorProvide
                     vscode.postMessage({ command: 'reloadReady', reloadId: message.reloadId, sessionId, state: recovery.snapshot() });
                     break;
                 case 'syncNotebook':
-                    syncNotebook(message.notebook, message.version, message.saveId);
+                    syncNotebook(message.notebook, message.version, message.saveId, message.delta);
                     break;
                 case 'saveFailed':
                     if (inFlight && message.saveId === inFlight.saveId) {

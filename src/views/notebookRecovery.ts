@@ -30,6 +30,16 @@ interface RecoveryApi {
  */
 export function createNotebookRecovery(api: RecoveryApi, document: any, current?: ArcNotebook, transferredState?: RecoveryState, sessionId?: string) {
   const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+  // Drafts keep what the user typed, not query results: outputs can be re-run,
+  // and copying them made every capture cost megabytes for a large result.
+  const strip = (notebook: ArcNotebook): ArcNotebook => ({
+    ...notebook,
+    cells: notebook.cells.map(cell => {
+      const rest = { ...cell };
+      delete rest.output;
+      return rest;
+    })
+  });
   const textValue = (value: unknown): string => {
     if (value === null || value === undefined) { return ''; }
     try { return String(value); }
@@ -56,7 +66,8 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
   const resuming = !!sessionId && previous?.sessionId === sessionId;
   const oldDraft = previous?.draft;
   if (oldDraft && !resuming) {
-    const unsavedModel = !same(oldDraft.notebook, oldDraft.base) && !same(oldDraft.notebook, current);
+    const unsavedModel = !same(strip(oldDraft.notebook), strip(oldDraft.base)) &&
+      !(current && same(strip(oldDraft.notebook), strip(current)));
     const incompleteRows = !same(oldDraft.variableRows, rowsFor(oldDraft.notebook));
     if ((unsavedModel || incompleteRows) && !recoveries.some(item => same(item.draft, oldDraft))) {
       recoveries.push({ id: `${Date.now()}-${recoveries.length}`, draft: copy(oldDraft) });
@@ -65,7 +76,7 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
   if (resuming) {
     active = oldDraft ? copy(oldDraft) : undefined;
   } else if (current) {
-    active = { notebook: copy(current), base: copy(current), variableRows: rowsFor(current) };
+    active = { notebook: copy(strip(current)), base: copy(strip(current)), variableRows: rowsFor(current) };
   }
 
   const persist = () => api.setState(copy({ revision: ++revision, sessionId, draft: active, recoveries }));
@@ -113,7 +124,7 @@ export function createNotebookRecovery(api: RecoveryApi, document: any, current?
     resuming,
     snapshot(): RecoveryState { return copy({ revision, sessionId, draft: active, recoveries }); },
     capture(notebook: ArcNotebook, base: ArcNotebook, variableRows: NotebookDraft['variableRows']) {
-      active = copy({ notebook, base, variableRows });
+      active = copy({ notebook: strip(notebook), base: strip(base), variableRows });
       persist();
     }
   };

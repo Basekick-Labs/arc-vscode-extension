@@ -4,13 +4,20 @@ import { ArcNotebook, ArcNotebookCell } from '../types/notebook';
  * Merge a sibling panel's saved notebook into this panel without discarding
  * edits relative to the base that actually produced them. On conflicts local wins.
  *
+ * localOutputChanges, when given, lists the cells whose output the local side
+ * replaced since base. Outputs are then taken from local for those cells and
+ * from incoming for the rest, with no content comparison: outputs are the
+ * large part of a notebook (a 50k-row result is megabytes) and are only ever
+ * replaced whole, so the sender knows exactly which ones it changed.
+ *
  * Must stay closure-free: this compiled function is also embedded in the
  * webview. Keep helpers inside it; do not add runtime imports or captures.
  */
 export function mergeSyncedNotebook(
   base: ArcNotebook,
   local: ArcNotebook,
-  incoming: ArcNotebook
+  incoming: ArcNotebook,
+  localOutputChanges?: number[]
 ): ArcNotebook {
   const sameValue = (left: unknown, right: unknown): boolean => {
     if (Object.is(left, right)) { return true; }
@@ -86,7 +93,9 @@ export function mergeSyncedNotebook(
       content: mergeValue(savedCell.content, localCell.content, incomingCell.content) as string
     };
 
-    const output = mergeValue(savedCell.output, localCell.output, incomingCell.output);
+    const output = localOutputChanges
+      ? (localOutputChanges.includes(index) ? localCell.output : incomingCell.output)
+      : mergeValue(savedCell.output, localCell.output, incomingCell.output);
     if (output === undefined) { delete cell.output; }
     else { cell.output = output as ArcNotebookCell['output']; }
 
@@ -118,6 +127,31 @@ export function mergeSyncedNotebook(
   }
 
   return merged;
+}
+
+/**
+ * Deep equality for notebook JSON. Closure-free (embedded in the webview).
+ * Shared references compare in O(1), which is what keeps the webview's
+ * "anything unsaved?" checks cheap: unchanged outputs are the same objects
+ * in the model and in its last acknowledged snapshot.
+ */
+export function sameNotebookValue(left: unknown, right: unknown): boolean {
+  const sameValue = (a: unknown, b: unknown): boolean => {
+    if (Object.is(a, b)) { return true; }
+    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') { return false; }
+    if (Array.isArray(a) || Array.isArray(b)) {
+      return Array.isArray(a) && Array.isArray(b) && a.length === b.length &&
+        a.every((value, index) => sameValue(value, b[index]));
+    }
+    const aRecord = a as Record<string, unknown>;
+    const bRecord = b as Record<string, unknown>;
+    const aKeys = Object.keys(aRecord).filter(key => aRecord[key] !== undefined).sort();
+    const bKeys = Object.keys(bRecord).filter(key => bRecord[key] !== undefined).sort();
+    return aKeys.length === bKeys.length && aKeys.every((key, index) =>
+      key === bKeys[index] && sameValue(aRecord[key], bRecord[key])
+    );
+  };
+  return sameValue(left, right);
 }
 
 /** Closure-free display conversion for arbitrary JSON values from a notebook. */

@@ -180,7 +180,11 @@ test('webview retains edits after send and allows only one unacknowledged save',
   b.flush();
   assert.equal(b.sent.length, 2);
   assert.equal(b.sent[1].notebook.cells[0].content, 'second');
-  assert.deepEqual(b.sent[1].base, written);
+  // A non-structural save's base carries no outputs; outputs merge by the
+  // list of cells this panel replaced, which is none here.
+  const { output: _writtenOutput, ...writtenCell1 } = written.cells[1];
+  assert.deepEqual(b.sent[1].base, { ...written, cells: [written.cells[0], writtenCell1] });
+  assert.deepEqual(b.sent[1].outputChanges, []);
   assert.deepEqual(b.sent[1].notebook.cells[1].output, written.cells[1].output);
 });
 
@@ -947,6 +951,91 @@ test('typing does not capture recovery state per keystroke, only once input paus
   assert.equal(captures, 0);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(captures, 1);
+});
+
+function countedRows(count: number) {
+  // Counts every read of a row, so a test can pin how many full passes over a
+  // large result one autosave cycle makes (JSON.stringify, deep compares and
+  // copies all read every row).
+  const reads = { count: 0 };
+  const rows = new Proxy(Array.from({ length: count }, (_, i) => [i, 'host-' + (i % 50), i / 10]), {
+    get(target, key, receiver) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) { reads.count++; }
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  return { reads, output: { columns: ['i', 'host', 'v'], rows, rowCount: count, executionTime: 1 } };
+}
+
+for (const count of [10000, 50000]) {
+  test(`an autosave cycle with a ${count}-row result reads the rows once (the send), and its ack and recovery capture not at all`, async t => {
+    const b = await browser(); t.after(() => b.dom.window.close());
+    const { reads, output } = countedRows(count);
+    // Dispatched directly: b.receive() would JSON-copy the counting rows away.
+    b.window.dispatchEvent(new b.window.MessageEvent('message', {
+      data: { command: 'cellResult', sessionId: b.panel.sessionId, index: 1, output }
+    }));
+    b.flush();
+    await b.panel.send(b.sent.at(-1));
+    b.receive(b.panel.messages.at(-1));
+    assert.equal(b.host.read().cells[1].output?.rows?.length, count);
+
+    // Steady state: typing in another cell while the result is in the notebook.
+    reads.count = 0;
+    b.input(b.cell(0), 'SELECT 0 -- typing');
+    b.flush();
+    assert.equal(reads.count, count, 'flush: only the postMessage serialization may read the rows');
+    const save = b.sent.at(-1);
+    assert.deepEqual(save.outputChanges, []);
+    assert.equal(save.base.cells[1].output, undefined);
+    await b.panel.send(save);
+    reads.count = 0;
+    b.receive(b.panel.messages.at(-1));
+    assert.equal(reads.count, 0, 'ack must not compare, copy or re-serialize the result');
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(reads.count, 0, 'recovery capture must not copy the result');
+    assert.equal(b.host.read().cells[0].content, 'SELECT 0 -- typing');
+    assert.equal(b.host.read().cells[1].output?.rows?.length, count);
+  });
+}
+
+test('host broadcasts only the outputs a write changed, and none back to the sender', async () => {
+  const h = await harness(), a = await h.panel(), b = await h.panel();
+  const result = fixture(); result.cells[1].output = { columns: ['v'], rows: [[42]], rowCount: 1 };
+  const withoutOutputs = (nb: ArcNotebook) => ({ ...nb, cells: nb.cells.map(({ output: _o, ...cell }) => cell) });
+  await a.send({ command: 'save', notebook: result, base: withoutOutputs(fixture()), outputChanges: [1], structural: false, saveId: 1 });
+  const toA = a.messages.at(-1), toB = b.messages.at(-1);
+  assert.equal(toA.saveId, 1);
+  assert.deepEqual(toA.delta, { baseVersion: 1, changed: [1], outputs: {} });
+  assert.ok(toA.notebook.cells.every((cell: any) => !('output' in cell)));
+  assert.deepEqual(toB.delta, { baseVersion: 1, changed: [1], outputs: Object.fromEntries([[1, { output: result.cells[1].output }]]) });
+  assert.ok(toB.notebook.cells.every((cell: any) => !('output' in cell)));
+
+  const typing = copy(result); typing.cells[0].content = 'typed';
+  await b.send({ command: 'save', notebook: typing, base: withoutOutputs(h.read()), outputChanges: [], structural: false, saveId: 1 });
+  assert.deepEqual(a.messages.at(-1).delta, { baseVersion: 2, changed: [], outputs: {} });
+  assert.deepEqual(h.read().cells[1].output, result.cells[1].output);
+  assert.equal(h.read().cells[0].content, 'typed');
+});
+
+test('a stale panel typing save keeps the newer result a sibling wrote', async () => {
+  const old = fixture(); old.cells[1].output = { columns: ['v'], rows: [[1]], rowCount: 1 };
+  const h = await harness(old), a = await h.panel(), b = await h.panel();
+  const withoutOutputs = (nb: ArcNotebook) => ({ ...nb, cells: nb.cells.map(({ output: _o, ...cell }) => cell) });
+  const rerun = copy(old); rerun.cells[1].output = { columns: ['v'], rows: [[2]], rowCount: 1 };
+  await a.send({ command: 'save', notebook: rerun, base: withoutOutputs(old), outputChanges: [1], structural: false, saveId: 1 });
+  // B has not processed A's broadcast yet: its model still holds the old result.
+  const typing = copy(old); typing.cells[0].content = 'typed in B';
+  await b.send({ command: 'save', notebook: typing, base: withoutOutputs(old), outputChanges: [], structural: false, saveId: 1 });
+  assert.deepEqual(h.read().cells[1].output, rerun.cells[1].output);
+  assert.equal(h.read().cells[0].content, 'typed in B');
+});
+
+test('a delta that does not start from the panel snapshot rebuilds instead of guessing outputs', async t => {
+  const b = await browser(); t.after(() => b.dom.window.close());
+  const next = fixture();
+  b.receive({ command: 'syncNotebook', notebook: next, version: 5, delta: { baseVersion: 3, changed: [], outputs: {} } });
+  assert.equal(b.sent.at(-1)?.command, 'reloadNotebook');
 });
 
 test('focus readiness with a pre-sync version re-sends the document instead of rebuilding the panel', async t => {
