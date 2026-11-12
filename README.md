@@ -87,7 +87,7 @@ CSV import and the data generator sustain roughly 50k-200k rows/second using Mes
 
 ## Telemetry
 
-The extension sends one anonymous beacon per day so we can count installs and see which versions are in use. It contains a randomly generated install ID, the extension and editor version, and the OS name and architecture - **never** queries, results, table names, server hostnames, or tokens. The install ID is generated locally and is not derived from your machine or account, so it cannot be tied to you or correlated across products.
+The extension sends one anonymous beacon per day so we can count installs and see which versions are in use. It contains a randomly generated install ID, a timestamp, the extension version, the editor name and version, and the OS name and architecture - **never** queries, results, table names, server hostnames, or tokens. The install ID is generated locally and is not derived from your machine or account, so it cannot be tied to you or correlated across products.
 
 Turn it off with `arc.telemetry.enabled`, or disable telemetry across VS Code with `telemetry.telemetryLevel: off` - either one is enough.
 
