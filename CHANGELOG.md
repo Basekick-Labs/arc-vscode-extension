@@ -20,7 +20,6 @@ All notable changes to the "Arc Database Manager" extension will be documented i
 - **A database per connection.** Connect and Edit Connection ask for an optional database, and **Arc: Set Connection Database** (command palette, a connection's context menu, or clicking the "Token is scoped" node) sets or clears it. The explorer, completions and schema views use it; queries you write still name their database in the SQL.
 - **Token permissions are chosen, not assumed.** Creating a token asks which of `read`, `write`, `delete` and `admin` it should carry, defaulting to Arc's own `read,write`. The created-token message lists them and notes that RBAC grants narrow them further if the token belongs to a team.
 - **First unit tests** (`npm test`, `node --test` over the compiled output), using the bodies Arc actually sends: the refusal classifier, and the HTTP client's handling of refusals, server faults, network errors and 404s on the listings and other calls.
-### Added
 - **Add a connection from the Connections view.** A **+** in the view's title bar runs the same flow as **Arc: Connect to Server**, like the + in Server Tokens. Previously a connection could only be added from the Explorer's plug icon, the status bar or the command palette.
 
 ## [0.3.6] - 2026-04-09
