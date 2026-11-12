@@ -4,6 +4,9 @@ All notable changes to the "Arc Database Manager" extension will be documented i
 
 ## [Unreleased]
 
+### Added
+- Database lifecycle from the Explorer: create databases and delete them after explicit confirmation (admin token; server deletion must be enabled). Existing database and measurement listing behaviour is preserved for scoped-token and older-server compatibility.
+
 ### Fixed
 - **No more made-up `default` database.** `getDatabases()` answered *any* failure by returning `['default']`, so a refused listing, an unreachable server or a server fault all put a database in the explorer that might not exist or might not be readable, with nothing saying why. It now never invents one: a refusal, a network problem or a server error is reported as what it is.
 - **Database-scoped tokens on Arc 26.09 and earlier.** Those servers refuse to list databases for a token restricted to particular ones (Arc after 26.09.4 returns only the databases the token can read, which the explorer shows as is, including "No databases visible to this token" when the list is empty). On a refusal the explorer uses the connection's database when one is set, and otherwise shows "Token is scoped — click to set this connection's database".

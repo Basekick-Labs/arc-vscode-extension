@@ -11,6 +11,7 @@ import {
   MeasurementInfo
 } from '../types';
 import { filterValidNames } from '../utils/sqlUtils.js';
+import { validateDatabaseName } from '../utils/databaseNames';
 import {
   ArcAccessError,
   classifyArcError
@@ -337,6 +338,68 @@ export class ArcClient {
       }
       throw this.handleError(error);
     }
+  }
+
+  /** Create a database through Arc's admin-protected database API. */
+  async createDatabase(name: string): Promise<void> {
+    const validation = validateDatabaseName(name);
+    if (validation) {
+      throw new Error(validation);
+    }
+    try {
+      await this.client.post('/api/v1/databases', { name });
+    } catch (error) {
+      throw this.handleDatabaseMutationError(error, 'create');
+    }
+  }
+
+  /**
+   * Delete a database after the UI has confirmed the destructive action.
+   * Arc requires both an admin token and the explicit `confirm=true` query.
+   */
+  async deleteDatabase(name: string): Promise<void> {
+    const validation = validateDatabaseName(name);
+    if (validation) {
+      throw new Error(validation);
+    }
+    try {
+      await this.client.delete(`/api/v1/databases/${encodeURIComponent(name)}`, {
+        params: { confirm: 'true' }
+      });
+    } catch (error) {
+      throw this.handleDatabaseMutationError(error, 'delete');
+    }
+  }
+
+  private handleDatabaseMutationError(error: unknown, operation: 'create' | 'delete'): Error {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const detail = serverErrorMessage(error.response?.data);
+      if (status === 403) {
+        // Delete can also be disabled server-side or target a reserved name;
+        // neither is an admin-token problem. A broken permission store is a
+        // server fault, not a reason to rotate the token.
+        if (detail && /delete operations are disabled|reserved database/i.test(detail)) {
+          return new Error(detail);
+        }
+        if (detail && /permission data unavailable/i.test(detail)) {
+          return new Error(`${detail} This is a server-side fault; check the Arc server log.`);
+        }
+        if (detail && /enterprise license/i.test(detail)) {
+          return new Error(detail);
+        }
+        const reason = detail || `Arc refused to ${operation} the database.`;
+        const punctuated = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+        return new Error(`${punctuated} This operation requires an admin token.`);
+      }
+      if (detail) {
+        return new Error(detail);
+      }
+      if (status === 400 || status === 404 || status === 409) {
+        return new Error(`Arc could not ${operation} the database.`);
+      }
+    }
+    return this.handleError(error);
   }
 
   /**

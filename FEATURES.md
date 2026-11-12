@@ -1600,3 +1600,7 @@ A: VS Code will notify you of updates. Or manually check in Extensions view → 
 
 *This documentation is for Arc VS Code Extension v0.1.4*
 *Last updated: October 2024*
+
+## Database lifecycle
+
+Create databases from the Arc Explorer with an admin token. Delete a database from its Explorer context menu after confirming the target connection and server; deletion also requires `delete.enabled=true` on the Arc server. The extension refreshes Explorer and SQL completions after either operation. If a delete request times out, Arc may still be processing it, so verify the server before retrying.
