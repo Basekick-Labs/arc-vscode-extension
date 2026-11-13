@@ -1,12 +1,31 @@
 import * as vscode from 'vscode';
 import { ArcQueryResult } from '../types';
 import { escapeHtml } from '../utils/sqlUtils';
+import {
+  collectChunks, encodeCsv, encodeJson, ExportChunk, ExportControl, NEVER_CANCELLED, writeChunksToFile
+} from '../utils/resultExport';
+
+/** Rows shown in the table, sent to the webview for the chart and Copy as Markdown. */
+export const DISPLAY_ROW_CAP = 1000;
+/** Exports above this many rows run with a cancellable progress notification. */
+const PROGRESS_THRESHOLD = DISPLAY_ROW_CAP;
+
+type ExportFormat = 'csv' | 'json';
 
 export class QueryResultsView {
   private static currentPanel: QueryResultsView | undefined;
   private static extensionUri: vscode.Uri;
   private readonly panel: vscode.WebviewPanel;
   private disposables: vscode.Disposable[] = [];
+  /**
+   * The result on screen. Exports read it, not the rows in the webview. One
+   * panel holds at most one result; it is released when the next query
+   * starts and when the panel closes.
+   */
+  private result?: ArcQueryResult;
+  /** Identifies the page on screen; an export click from an older page is refused. */
+  private generation = 0;
+  private exporting = false;
 
   /**
    * Must be called once during extension activation to set the extension URI.
@@ -23,10 +42,10 @@ export class QueryResultsView {
       message => {
         switch (message.command) {
           case 'exportCSV':
-            this.exportToCSV(message.data);
+            this.exportResult('csv', message.generation);
             break;
           case 'exportJSON':
-            this.exportToJSON(message.data);
+            this.exportResult('json', message.generation);
             break;
           case 'copyMarkdown':
             this.copyMarkdown(message.data);
@@ -65,9 +84,30 @@ export class QueryResultsView {
     }
   }
 
+  /**
+   * Drop a large held result before a new query runs, so it and the new
+   * response are never in memory together (an export still writing keeps
+   * its own reference until it finishes). A result of at most
+   * DISPLAY_ROW_CAP rows is kept, so the table on screen stays exportable
+   * after a failed query, as before. A larger one's table stays on screen,
+   * and exporting it asks for the query to be run again.
+   */
+  public static releaseResult(): void {
+    const panel = QueryResultsView.currentPanel;
+    if (panel?.result && panel.result.rows.length > DISPLAY_ROW_CAP) {
+      panel.result = undefined;
+    }
+  }
+
   private update(results: ArcQueryResult, query: string): void {
+    // Build the page first: if that throws, the previous page, result and
+    // generation stay consistent with each other.
+    const generation = this.generation + 1;
+    const html = this.getHtmlContent(results, query, generation);
     this.panel.title = 'Arc Query Results';
-    this.panel.webview.html = this.getHtmlContent(results, query);
+    this.panel.webview.html = html;
+    this.result = results;
+    this.generation = generation;
   }
 
   private getNonce(): string {
@@ -79,7 +119,7 @@ export class QueryResultsView {
     return nonce;
   }
 
-  private getHtmlContent(results: ArcQueryResult, query: string): string {
+  private getHtmlContent(results: ArcQueryResult, query: string, generation: number): string {
     const { columns, rows, rowCount, executionTime } = results;
     const webview = this.panel.webview;
     const nonce = this.getNonce();
@@ -93,7 +133,7 @@ export class QueryResultsView {
     const headerRow = columns.map(col => `<th>${escapeHtml(col)}</th>`).join('');
 
     // Generate table rows
-    const dataRows = rows.slice(0, 1000).map(row => {
+    const dataRows = rows.slice(0, DISPLAY_ROW_CAP).map(row => {
       const cells = row.map(cell => {
         const value = cell === null ? '<i>null</i>' : String(cell);
         return `<td>${escapeHtml(value)}</td>`;
@@ -101,7 +141,7 @@ export class QueryResultsView {
       return `<tr>${cells}</tr>`;
     }).join('');
 
-    const truncated = rows.length > 1000 ? `<p class="warning">Showing first 1000 rows of ${rowCount} total rows</p>` : '';
+    const truncated = rows.length > DISPLAY_ROW_CAP ? `<p class="warning">Showing first ${DISPLAY_ROW_CAP} rows of ${rowCount} total rows</p>` : '';
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -247,8 +287,11 @@ export class QueryResultsView {
         const vscode = acquireVsCodeApi();
         const resultsData = {
             columns: ${JSON.stringify(columns)},
-            rows: ${JSON.stringify(rows.slice(0, 1000))}
+            rows: ${JSON.stringify(rows.slice(0, DISPLAY_ROW_CAP))}
         };
+        // Exports are built by the extension from the full result; the page
+        // only says which result it shows.
+        const generation = ${generation};
 
         let chartInstance = null;
 
@@ -267,14 +310,14 @@ export class QueryResultsView {
         function exportCSV() {
             vscode.postMessage({
                 command: 'exportCSV',
-                data: resultsData
+                generation
             });
         }
 
         function exportJSON() {
             vscode.postMessage({
                 command: 'exportJSON',
-                data: resultsData
+                generation
             });
         }
 
@@ -436,79 +479,144 @@ export class QueryResultsView {
 </html>`;
   }
 
-  private async exportToCSV(data: { columns: string[], rows: any[][] }): Promise<void> {
-    try {
-      // Convert to CSV format
-      const csv = this.convertToCSV(data.columns, data.rows);
-
-      // Save to file
-      const uri = await vscode.window.showSaveDialog({
-        filters: { 'CSV Files': ['csv'] },
-        defaultUri: vscode.Uri.file('query_results.csv')
-      });
-
-      if (uri) {
-        await vscode.workspace.fs.writeFile(uri, Buffer.from(csv, 'utf-8'));
-        vscode.window.showInformationMessage(`Exported ${data.rows.length} rows to ${uri.fsPath}`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      vscode.window.showErrorMessage(`Export failed: ${message}`);
+  /**
+   * Export the held result to CSV or JSON. The click names the page it came
+   * from; the result held for that page is the one exported, even if another
+   * query finishes while the prompt or the save dialog is open.
+   */
+  private async exportResult(format: ExportFormat, generation: unknown): Promise<void> {
+    const snapshot = this.result;
+    if (!snapshot || generation !== this.generation) {
+      vscode.window.showWarningMessage(snapshot
+        ? 'The results changed; export again.'
+        : 'These results are no longer held; run the query again to export them.');
+      return;
     }
-  }
-
-  private async exportToJSON(data: { columns: string[], rows: any[][] }): Promise<void> {
-    try {
-      // Convert to JSON format
-      const json = this.convertToJSON(data.columns, data.rows);
-
-      // Save to file
-      const uri = await vscode.window.showSaveDialog({
-        filters: { 'JSON Files': ['json'] },
-        defaultUri: vscode.Uri.file('query_results.json')
-      });
-
-      if (uri) {
-        await vscode.workspace.fs.writeFile(uri, Buffer.from(json, 'utf-8'));
-        vscode.window.showInformationMessage(`Exported ${data.rows.length} rows to ${uri.fsPath}`);
+    const refuseIfRunning = (): boolean => {
+      if (this.exporting) {
+        vscode.window.showInformationMessage('An export is already running.');
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      vscode.window.showErrorMessage(`Export failed: ${message}`);
-    }
-  }
-
-  private convertToCSV(columns: string[], rows: any[][]): string {
-    const escapeCsvValue = (value: any): string => {
-      if (value === null || value === undefined) {
-        return '';
-      }
-      const str = String(value);
-      // Escape quotes and wrap in quotes if contains comma, quote, or newline
-      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-        return '"' + str.replace(/"/g, '""') + '"';
-      }
-      return str;
+      return this.exporting;
     };
+    if (refuseIfRunning()) {
+      return;
+    }
+    // The prompt and the save dialog do not count as running: a click in the
+    // page that closes the prompt starts a new export instead of being refused.
+    let started = false;
+    try {
+      const count = await this.chooseRowCount(snapshot);
+      if (count === undefined) {
+        return;
+      }
 
-    const lines = [
-      columns.map(escapeCsvValue).join(','),
-      ...rows.map(row => row.map(escapeCsvValue).join(','))
-    ];
+      const csv = format === 'csv';
+      const uri = await vscode.window.showSaveDialog({
+        filters: csv ? { 'CSV Files': ['csv'] } : { 'JSON Files': ['json'] },
+        defaultUri: vscode.Uri.file(csv ? 'query_results.csv' : 'query_results.json')
+      });
+      if (!uri || refuseIfRunning()) {
+        return;
+      }
+      this.exporting = started = true;
 
-    return lines.join('\n');
+      const chunks = (): Iterable<ExportChunk> => csv
+        ? encodeCsv(snapshot.columns, snapshot.rows, count)
+        : encodeJson(snapshot.columns, snapshot.rows, count);
+      const write = async (control: ExportControl): Promise<boolean> => {
+        if (uri.scheme === 'file') {
+          return writeChunksToFile(uri.fsPath, chunks(), control);
+        }
+        // Other file systems take the whole content at once.
+        const buffer = await collectChunks(chunks(), control);
+        if (!buffer) {
+          return false;
+        }
+        await vscode.workspace.fs.writeFile(uri, buffer);
+        return true;
+      };
+
+      const written = count > PROGRESS_THRESHOLD
+        ? await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Exporting ${count} rows`, cancellable: true },
+          (progress, token) => {
+            let reported = 0;
+            return write({
+              isCancelled: () => token.isCancellationRequested,
+              onCancel: listener => token.onCancellationRequested(listener),
+              onProgress: rows => {
+                progress.report({ message: `${rows} of ${count}`, increment: (rows - reported) * 100 / count });
+                reported = rows;
+              }
+            });
+          })
+        : await write(NEVER_CANCELLED);
+      if (written) {
+        this.reportExport(snapshot, count, uri.fsPath);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      vscode.window.showErrorMessage(`Export failed: ${message}`);
+    } finally {
+      if (started) {
+        this.exporting = false;
+      }
+    }
   }
 
-  private convertToJSON(columns: string[], rows: any[][]): string {
-    const objects = rows.map(row => {
-      const obj: Record<string, any> = {};
-      columns.forEach((col, i) => {
-        obj[col] = row[i];
-      });
-      return obj;
-    });
+  /**
+   * Rows to export: every held row, or `arc.export.maxRows` when set, or the
+   * user's choice when `arc.export.promptForRowCount` is on. Undefined when
+   * the prompt is dismissed.
+   */
+  private async chooseRowCount(result: ArcQueryResult): Promise<number | undefined> {
+    const held = result.rows.length;
+    const config = vscode.workspace.getConfiguration('arc');
+    const setting = config.get<unknown>('export.maxRows', 0);
+    // Anything but a positive integer means "no limit"; the settings schema
+    // already flags invalid values.
+    const maxRows = typeof setting === 'number' && Number.isInteger(setting) && setting > 0 ? setting : 0;
+    const fromSetting = maxRows > 0 ? Math.min(maxRows, held) : held;
+    if (config.get<unknown>('export.promptForRowCount', false) !== true || held === 0) {
+      return fromSetting;
+    }
 
-    return JSON.stringify(objects, null, 2);
+    const items: Array<vscode.QuickPickItem & { count?: number }> = [{ label: `All ${held} rows`, count: held,
+      // Only the Arrow parser holds fewer rows than the server returned.
+      description: result.rowCount > held ? `Arrow keeps the first ${held} of ${result.rowCount} rows` : undefined }];
+    if (maxRows > 0 && maxRows < held) {
+      items.push({ label: `First ${maxRows} rows`, description: 'arc.export.maxRows', count: maxRows });
+    }
+    items.push({ label: 'Custom…' });
+    const picked = await vscode.window.showQuickPick(items, { placeHolder: 'How many rows to export?' });
+    if (!picked) {
+      return undefined;
+    }
+    if (picked.count !== undefined) {
+      return picked.count;
+    }
+    const value = await vscode.window.showInputBox({
+      prompt: `Number of rows to export (1-${held})`,
+      value: String(fromSetting),
+      validateInput: text => parseRowCount(text, held) === undefined ? `Enter a whole number from 1 to ${held}` : undefined
+    });
+    return value === undefined ? undefined : parseRowCount(value, held);
+  }
+
+  private reportExport(result: ArcQueryResult, written: number, fsPath: string): void {
+    const held = result.rows.length;
+    // rowCount equals the rows held, except for an Arrow result above the
+    // parser's cap. Warn only when that cap is what cut the export.
+    const total = Math.max(result.rowCount, held);
+    if (written === held && total > held) {
+      vscode.window.showWarningMessage(
+        `Exported ${written} of ${total} rows to ${fsPath}. Arrow results keep only the first ${held} rows; set arc.resultFormat to "json" to export them all.`
+      );
+    } else if (written < total) {
+      vscode.window.showInformationMessage(`Exported ${written} of ${total} rows to ${fsPath}`);
+    } else {
+      vscode.window.showInformationMessage(`Exported ${written} rows to ${fsPath}`);
+    }
   }
 
   private async copyMarkdown(data: { columns: string[], rows: any[][] }): Promise<void> {
@@ -546,6 +654,7 @@ export class QueryResultsView {
 
   public dispose(): void {
     QueryResultsView.currentPanel = undefined;
+    this.result = undefined;
 
     this.panel.dispose();
 
@@ -556,4 +665,12 @@ export class QueryResultsView {
       }
     }
   }
+}
+
+function parseRowCount(text: string, max: number): number | undefined {
+  if (!/^\s*\d+\s*$/.test(text)) {
+    return undefined;
+  }
+  const count = Number(text);
+  return count >= 1 && count <= max ? count : undefined;
 }

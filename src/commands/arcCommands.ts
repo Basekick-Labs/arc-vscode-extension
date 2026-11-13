@@ -636,6 +636,8 @@ export class ArcCommands {
       let errorMessage;
 
       try {
+        // Release the previous result before the new one is fetched.
+        QueryResultsView.releaseResult();
         results = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
@@ -1227,6 +1229,8 @@ export class ArcCommands {
 
       const query = `SELECT * FROM ${quoteIdentifier(tableName)} LIMIT 10`;
 
+      // Release the previous result before the new one is fetched.
+      QueryResultsView.releaseResult();
       const results = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
