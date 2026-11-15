@@ -183,7 +183,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('arc.executeQuery', () => commands.executeQuery()),
     vscode.commands.registerCommand('arc.refreshExplorer', () => commands.refreshExplorer()),
     vscode.commands.registerCommand('arc.createDatabase', () => databaseCommands.createDatabase()),
-    vscode.commands.registerCommand('arc.deleteDatabase', (treeItem) => databaseCommands.deleteDatabase(treeItem)),
+    vscode.commands.registerCommand('arc.deleteDatabase', async (treeItem) => {
+      await databaseCommands.deleteDatabase(treeItem);
+      // Deleting the active database clears it; the status bar names it.
+      updateStatusBar();
+    }),
     vscode.commands.registerCommand('arc.showMeasurements', () => commands.showMeasurements()),
     vscode.commands.registerCommand('arc.insertTestData', () => commands.insertTestData()),
     vscode.commands.registerCommand('arc.showHealth', () => commands.showHealth()),

@@ -75,7 +75,8 @@ describe('ArcClient database endpoints', () => {
 
   it('preserves per-database measurement refusals', async () => {
     const { arc, mock } = client();
-    mock.onPost('/api/v1/query').reply(403, { error: "no permission for read on database 'metrics'" });
+    // What Arc answers SHOW TABLES FROM metrics with for a token not granted that database.
+    mock.onPost('/api/v1/query').reply(403, { success: false, error: "access denied: no read permission for database 'metrics'" });
     await assert.rejects(() => arc.getMeasurements('metrics'), (error: unknown) => error instanceof ArcAccessError);
   });
 
@@ -104,7 +105,7 @@ describe('ArcClient database endpoints', () => {
     assert.equal(mock.history.post.length, 0);
   });
 
-  it('uses Arc's exact admin-required response and separates the sentences', async () => {
+  it("uses Arc's exact admin-required response and separates the sentences", async () => {
     const { arc, mock } = client();
     mock.onPost('/api/v1/databases').reply(403, { error: 'Permission denied: admin required' });
     await assert.rejects(() => arc.createDatabase('metrics'), /Permission denied: admin required\. This operation requires an admin token\./);
@@ -115,10 +116,13 @@ describe('ArcClient database endpoints', () => {
     mock.onDelete('/api/v1/databases/metrics').reply(403, {
       error: 'Delete operations are disabled. Set delete.enabled=true in arc.toml to enable.'
     });
-    await assert.rejects(() => arc.deleteDatabase('metrics'), /Delete operations are disabled\. Set delete\.enabled=true/);
+    // Shown as Arc wrote it: no admin-token advice appended.
+    await assert.rejects(() => arc.deleteDatabase('metrics'), {
+      message: 'Delete operations are disabled. Set delete.enabled=true in arc.toml to enable.'
+    });
   });
 
-  it('surfaces Arc's actual non-primary writer response', async () => {
+  it("surfaces Arc's actual non-primary writer response", async () => {
     const { arc, mock } = client();
     mock.onDelete('/api/v1/databases/metrics').reply(503, {
       error: 'database delete rejected: node role "reader" is not primary writer; route to the primary writer'
