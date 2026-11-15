@@ -193,6 +193,15 @@ The **Arc Explorer** view shows your database structure.
    - **Query Today**: Pre-filtered for today's data
    - Automatically adds WHERE clause with time filter
 
+### Creating and Deleting Databases
+
+Both need an admin token.
+
+- **Create:** the database icon in the Arc Explorer title bar, or `Arc: Create Database` from the Command Palette. Names follow Arc's rule: 1-64 characters, starting with a letter, then letters, digits, `_` or `-`; `system`, `internal` and `_internal` are reserved.
+- **Delete:** right-click a database in the Arc Explorer and choose **Delete Database**. A confirmation names the database, the connection and its server. The Arc server must have `delete.enabled = true`; otherwise Arc refuses and its message is shown. Deleting the connection's own database clears that connection's database setting.
+
+The Explorer and SQL completions refresh after either operation, including when it fails. A large delete can outlast the client's request timeout while Arc carries on; after a timeout, check the server before retrying.
+
 ---
 
 ## Query History & Saved Queries
@@ -1318,6 +1327,8 @@ All commands available via Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 **Explorer:**
 - `Arc: Refresh Explorer`
+- `Arc: Create Database`
+- `Arc: Delete Database` (Explorer context menu only)
 - `Arc: Show Measurements`
 - `Arc: Show Table Schema`
 - `Arc: Preview Table Data`
